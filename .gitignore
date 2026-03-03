@@ -13,6 +13,12 @@ dist/
 .env.local
 .env.*.local
 
+# Ignore all markdown files
+*.md
+
+# But do NOT ignore README.md
+!README.md
+
 # IDE
 .vscode/
 .idea/
