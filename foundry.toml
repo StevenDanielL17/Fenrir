@@ -6,6 +6,12 @@ script = "contracts/script"
 libs = ["lib"]
 solc = "0.8.20"
 
+# Remappings — resolve library imports to the correct paths
+remappings = [
+    "forge-std/=lib/forge-std/src/",
+    "@openzeppelin/=lib/openzeppelin-contracts/",
+]
+
 [rpc_endpoints]
 westend = "https://westend-rpc.polkadot.io"
 polkadot_hub = "https://rpc.polkadot-hub.parity.io"
