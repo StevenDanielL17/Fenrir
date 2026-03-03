@@ -188,52 +188,14 @@ contract FenrirScorer {
         returns (uint8 score)
     {
         // Ensure we haven't already scored this proposal.
-        // Each proposal gets exactly one immutable score for transparency.
         require(!scores[refIndex].exists, "Fenrir: already scored");
 
-        // ----- Step 1: Fetch proposal data from governance precompile -----
-        (
-            uint8 status,
-            address proposer,
-            uint256 requestedDOT,
-            uint256 submittedAt,
-            /* bytes32 contentHash */
-        ) = GOVERNANCE.getReferendumInfo(refIndex);
+        // Fetch proposal data and score it via the internal helper.
+        // Split into a separate function to avoid stack-too-deep.
+        (uint8 riskScore, uint8 flagBitmask, address proposer, uint256 requestedDOT) =
+            _fetchAndScore(refIndex);
 
-        // Only score active (ongoing) proposals — we cannot retroactively
-        // score proposals that have already concluded.
-        require(status == 0, "Fenrir: only score active proposals");
-
-        // ----- Step 2: Fetch proposer governance history -----
-        (
-            uint32 totalProposals,
-            uint32 approvedCount,
-            uint256 firstActivityBlock
-        ) = GOVERNANCE.getProposerHistory(proposer);
-
-        // ----- Step 3: Compute feature values -----
-        // Wallet age: how many blocks have elapsed since the proposer's
-        // first on-chain activity. This is a proxy for trustworthiness.
-        uint256 walletAgeBlocks = submittedAt > firstActivityBlock
-            ? submittedAt - firstActivityBlock
-            : 0;
-
-        // ----- Step 4: Cross-contract call to PVM inference -----
-        // This is where the magic happens — Solidity calls a Rust
-        // contract running on PolkaVM. The inference contract evaluates
-        // the feature vector against trained ML weights and returns
-        // a score and flag bitmask.
-        (uint8 riskScore, uint8 flagBitmask) = inferenceContract.scoreProposal(
-            walletAgeBlocks,
-            requestedDOT,
-            baselineAvgDOT,
-            approvedCount,
-            totalProposals,
-            uint256(keccak256(abi.encodePacked(refIndex))),  // Simplified content hash
-            uint8(refIndex % 16)  // Track ID approximation for demo
-        );
-
-        // ----- Step 5: Store the immutable on-chain result -----
+        // Store the immutable on-chain result
         scores[refIndex] = FenrirScore({
             score: riskScore,
             flags: flagBitmask,
@@ -243,16 +205,45 @@ contract FenrirScorer {
 
         totalScored++;
 
-        // ----- Step 6: Broadcast the scoring event -----
-        emit ScorePublished(
-            refIndex,
-            proposer,
-            riskScore,
-            flagBitmask,
-            requestedDOT
-        );
+        // Broadcast the scoring event
+        emit ScorePublished(refIndex, proposer, riskScore, flagBitmask, requestedDOT);
 
         return riskScore;
+    }
+
+    /// @dev Internal helper that fetches precompile data and calls inference.
+    ///      Separated from scoreReferendum to keep the EVM stack shallow.
+    function _fetchAndScore(uint32 refIndex)
+        internal
+        view
+        returns (uint8 riskScore, uint8 flagBitmask, address proposer, uint256 requestedDOT)
+    {
+        // Step 1: Fetch proposal data from governance precompile
+        uint8 status;
+        uint256 submittedAt;
+        (status, proposer, requestedDOT, submittedAt, ) = GOVERNANCE.getReferendumInfo(refIndex);
+
+        require(status == 0, "Fenrir: only score active proposals");
+
+        // Step 2: Fetch proposer history and compute wallet age
+        uint256 walletAge;
+        {
+            (uint32 totalProposals, uint32 approvedCount, uint256 firstActivity) =
+                GOVERNANCE.getProposerHistory(proposer);
+
+            walletAge = submittedAt > firstActivity ? submittedAt - firstActivity : 0;
+
+            // Step 3: Cross-contract call to PVM Rust inference
+            (riskScore, flagBitmask) = inferenceContract.scoreProposal(
+                walletAge,
+                requestedDOT,
+                baselineAvgDOT,
+                approvedCount,
+                totalProposals,
+                uint256(keccak256(abi.encodePacked(refIndex))),
+                uint8(refIndex % 16)
+            );
+        }
     }
 
     // ==================================================================
@@ -369,7 +360,7 @@ contract FenrirScorer {
 
         // Check each flag bit and add the corresponding description
         if (flags & FLAG_NEW_WALLET != 0) {
-            result[count++] = "New wallet — no established history";
+            result[count++] = "New wallet: no established history";
         }
         if (flags & FLAG_LARGE_REQUEST != 0) {
             result[count++] = "Request exceeds 3x ecosystem average";

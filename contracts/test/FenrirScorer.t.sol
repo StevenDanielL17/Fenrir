@@ -175,6 +175,16 @@ contract FenrirScorerTest is Test {
     uint32 constant LOW_RISK_REF = 845;
     uint32 constant INACTIVE_REF = 900;
 
+    // Local event declaration — mirrors FenrirScorer.ScorePublished
+    // Required because Solidity 0.8.20 does not permit ContractName.EventName syntax in emit
+    event ScorePublished(
+        uint32 indexed refIndex,
+        address indexed proposer,
+        uint8 score,
+        uint8 flags,
+        uint256 requestedDOT
+    );
+
     function setUp() public {
         // Deploy mock contracts
         mockGov = new MockGovernancePrecompile();
@@ -477,7 +487,7 @@ contract FenrirScorerTest is Test {
 
         // We expect the ScorePublished event to be emitted
         vm.expectEmit(true, true, false, true);
-        emit FenrirScorer.ScorePublished(
+        emit ScorePublished(
             HIGH_RISK_REF,
             riskProposer,
             82,
