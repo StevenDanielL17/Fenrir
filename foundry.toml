@@ -1,0 +1,11 @@
+[profile.default]
+src = "contracts/src"
+out = "contracts/out"
+test = "contracts/test"
+script = "contracts/script"
+libs = ["lib"]
+solc = "0.8.20"
+
+[rpc_endpoints]
+westend = "https://westend-rpc.polkadot.io"
+polkadot_hub = "https://rpc.polkadot-hub.parity.io"

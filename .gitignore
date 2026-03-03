@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+lib/
+
+# Build outputs
+contracts/out/
+contracts/cache/
+target/
+dist/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# ML data (large files)
+ml/data/*.csv
+ml/data/*.pkl
+!ml/data/.gitkeep
+
+# Foundry
+cache/
+out/
