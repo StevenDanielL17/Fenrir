@@ -2,7 +2,7 @@
   <h1 align="center">🐺 FENRIR</h1>
   <p align="center"><strong>On-Chain OpenGov Risk Intelligence for Polkadot</strong></p>
   <p align="center">
-    <em>The wolf that hunts corruption in governance.</em>
+    <em>On-chain OpenGov risk scorer powered by PVM ML inference.</em>
   </p>
 </p>
 
@@ -21,15 +21,17 @@
 
 ## The Problem
 
-Polkadot's OpenGov processes treasury requests worth **millions of DOT**. Human reviewers can't scale. Malicious actors submit treasury drain proposals with new wallets, inflated budgets, and recycled pitches — and sometimes they pass. There is no automated, trustless risk assessment layer.
+Polkadot's OpenGov processes treasury requests worth **millions of DOT**. Human reviewers can't scale. Participation has dropped **64%**, and the treasury has roughly **24 months of runway** left. Malicious actors submit treasury drain proposals with fresh wallets, inflated budgets, and recycled pitches — and sometimes they pass. There is no automated, trustless risk assessment layer.
 
 ## The Solution
 
-**Fenrir** is an on-chain risk scoring system deployed on Polkadot Hub that analyzes OpenGov treasury proposals in real-time.
+**Fenrir** is an on-chain risk scoring system deployed on Polkadot Hub that analyses OpenGov treasury proposals in real-time.
 
 A Solidity contract reads live proposal data via the **governance precompile**, feeds structured features into a **Rust-compiled ML classifier running natively on PolkaVM**, and writes a public **risk score (0–100)** with explainable flags back on-chain — **no oracle, no off-chain service, no trust assumption**.
 
 Any wallet, UI, or contract in the Polkadot ecosystem can read a proposal's Fenrir score before voting.
+
+**Track 2: PVM Smart Contracts** | Polkadot Solidity Hackathon 2026
 
 ---
 
@@ -41,26 +43,23 @@ Any wallet, UI, or contract in the Polkadot ecosystem can read a proposal's Fenr
 │                                                             │
 │  ┌──────────────┐    ┌─────────────────────────────────┐   │
 │  │  Governance  │───▶│     FenrirScorer.sol            │   │
-│  │  Precompile  │    │  (Solidity - REVM/EVM layer)    │   │
+│  │  Precompile  │    │  (Solidity - EVM layer)         │   │
 │  │  (0x0807)    │    │  - Reads proposal data          │   │
-│  └──────────────┘    │  - Encodes feature vector       │   │
-│                      │  - Calls PVM inference contract │   │
+│  └──────────────┘    │  - Computes feature vector      │   │
+│                      │  - Calls PVM inference (Rust)   │   │
 │  ┌──────────────┐    │  - Stores score + flags         │   │
 │  │ Asset Hub    │───▶│  - Emits ScorePublished event   │   │
 │  │ Precompile   │    └──────────────┬──────────────────┘   │
-│  │ (native DOT  │                   │ cross-contract call   │
-│  │  threshold)  │    ┌──────────────▼──────────────────┐   │
-│  └──────────────┘    │     FenrirInference (PVM)        │   │
-│                      │  Rust contract compiled to       │   │
-│  ┌──────────────┐    │  RISC-V — runs ML classifier    │   │
-│  │ XCM Precomp  │    │  with hardcoded weights         │   │
-│  │ (0x0803)     │◀───│  Returns: score + flag bitmask  │   │
-│  └──────────────┘    └─────────────────────────────────┘   │
-│         │                                                   │
-└─────────┼───────────────────────────────────────────────────┘
-          │ XCM broadcast (optional)
-          ▼
-    Asset Hub / other parachains read Fenrir scores
+│  │ (0x0808)     │                   │ cross-contract call   │
+│  └──────────────┘    ┌──────────────▼──────────────────┐   │
+│                      │     FenrirInference (PVM)        │   │
+│                      │  Rust compiled to RISC-V         │   │
+│                      │  Runs ML classifier with         │   │
+│                      │  hardcoded weights from sklearn   │   │
+│                      │  Returns: packed u64             │   │
+│                      │  (score << 32 | flag bitmask)    │   │
+│                      └─────────────────────────────────┘   │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ### Three-Layer Design
@@ -77,32 +76,34 @@ Any wallet, UI, or contract in the Polkadot ecosystem can read a proposal's Fenr
 
 ### 1. Score a Proposal
 
-Call `scoreReferendum(refIndex)` on the FenrirScorer contract. The contract:
+Call `scoreReferendum(refIndex)` on the FenrirScorer contract:
 
-1. **Fetches proposal data** from the governance precompile (`0x0807`) — proposer address, requested DOT amount, submission block, content hash
+1. **Fetches proposal data** from the governance precompile (`0x0807`)
 2. **Fetches proposer history** — total proposals, approval count, first activity block
-3. **Encodes a feature vector** — wallet age, DOT ratio to ecosystem average, approval rate, track ID
-4. **Calls the PVM inference contract** — Rust-compiled ML model processes the features and returns a risk score (0–100) and flag bitmask
-5. **Stores the result on-chain** — score, flags, and block number are permanently recorded
-6. **Emits `ScorePublished` event** — frontends and other contracts can listen and react
+3. **Computes derived features** — wallet age, days since last proposal, DOT ratio
+4. **Calls the PVM inference contract** — Rust ML model returns a risk score (0–100) and flag bitmask
+5. **Stores the result on-chain** — score, flags, requestedDOT, and block number
+6. **Emits `ScorePublished` event** — frontends and contracts can listen and react
+
+If the inference call fails, the contract gracefully falls back to a neutral score of 50 with an `INFERENCE_FAILED` flag — scoring is never blocked.
 
 ### 2. Read a Score
 
-Call `getScore(refIndex)` to receive:
+Call `getScoreDetails(refIndex)` to receive:
 
 - **Risk score** (0–100)
 - **Verdict** — `MINIMAL RISK`, `LOW RISK`, `MODERATE RISK`, or `HIGH RISK`
-- **Active flags** — human-readable explanations of what triggered the score
+- **Individual flags** — 5 boolean values indicating which risk factors triggered
 
 ### 3. Risk Flags (Explainability)
 
-| Flag                      | Bitmask | Meaning                                                    |
-| ------------------------- | ------- | ---------------------------------------------------------- |
-| `FLAG_NEW_WALLET`         | `0x01`  | Wallet created < 50,000 blocks ago (~83 days)              |
-| `FLAG_LARGE_REQUEST`      | `0x02`  | Requesting > 3x the ecosystem average DOT                  |
-| `FLAG_NO_TRACK_HISTORY`   | `0x04`  | Proposer has no previously approved proposals              |
-| `FLAG_CONTENT_SIMILARITY` | `0x08`  | Proposal content similar to a previously rejected proposal |
-| `FLAG_BURST_ACTIVITY`     | `0x10`  | Multiple proposals submitted in a short time window        |
+| Flag                 | Bitmask | Meaning                                       |
+| -------------------- | ------- | --------------------------------------------- |
+| `FLAG_NEW_WALLET`    | `0x01`  | Wallet created < 50,000 blocks ago (~83 days) |
+| `FLAG_LARGE_REQUEST` | `0x02`  | Requesting > 3x the ecosystem average DOT     |
+| `FLAG_NO_HISTORY`    | `0x04`  | Proposer has no previously approved proposals |
+| `FLAG_LOW_APPROVAL`  | `0x08`  | Less than 20% of past proposals were approved |
+| `FLAG_BURST`         | `0x10`  | Multiple proposals submitted within 3 days    |
 
 ---
 
@@ -110,55 +111,33 @@ Call `getScore(refIndex)` to receive:
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) (stable + nightly)
 - [Foundry](https://getfoundry.sh/) (forge, cast, anvil)
 - [Node.js](https://nodejs.org/) >= 18
-- [revive-cli](https://github.com/nicola-parity/revive) (Parity's Solidity → PolkaVM compiler)
+- [Python](https://python.org/) >= 3.9
+- [Rust](https://rustup.rs/) (stable + nightly) — for PVM contract only
 
-### Installation
+### Quick Start (Under 10 Commands)
 
 ```bash
-# Clone the repository
+# Clone
 git clone https://github.com/YOUR_USERNAME/fenrir.git
 cd fenrir
 
 # Install Foundry dependencies
-cd contracts && forge install && cd ..
+forge install
 
-# Install revive toolchain for PVM compilation
-cargo install revive-cli
+# Build + test contracts
+forge build
+forge test -vvv
 
-# Install frontend dependencies
+# Install frontend
 cd frontend && npm install && cd ..
 
-# Install ML pipeline dependencies
+# Install ML dependencies
 cd ml && pip install -r requirements.txt && cd ..
-```
 
-### Build
-
-```bash
-# Build Solidity contracts
-cd contracts && forge build
-
-# Build Rust inference contract for PolkaVM
-cd inference && cargo build --target riscv32emac-unknown-none-polkavm --release
-
-# Build frontend
-cd frontend && npm run build
-```
-
-### Test
-
-```bash
-# Run Solidity tests
-cd contracts && forge test -vvv
-
-# Run Rust inference tests
-cd inference && cargo test
-
-# Run ML pipeline tests
-cd ml && python -m pytest
+# Run frontend locally
+cd frontend && npm run dev
 ```
 
 ---
@@ -167,30 +146,47 @@ cd ml && python -m pytest
 
 ### FenrirScorer.sol (EVM)
 
-The main orchestrator contract deployed on Polkadot Hub's EVM layer.
+The main orchestrator contract. Uses OpenZeppelin `ReentrancyGuard` + `Ownable2Step`.
 
-| Function                  | Visibility  | Description                                                    |
-| ------------------------- | ----------- | -------------------------------------------------------------- |
-| `scoreReferendum(uint32)` | `external`  | Score an active referendum — calls precompiles + PVM inference |
-| `getScore(uint32)`        | `view`      | Returns score, verdict string, and active flag descriptions    |
-| `updateBaseline(uint256)` | `onlyOwner` | Update the ecosystem average DOT request baseline              |
-| `scores(uint32)`          | `view`      | Raw score struct: score, flags, scoredAtBlock, exists          |
+| Function                            | Visibility  | Description                                         |
+| ----------------------------------- | ----------- | --------------------------------------------------- |
+| `scoreReferendum(uint32)`           | `external`  | Score an active referendum (calls precompile + PVM) |
+| `getScoreDetails(uint32)`           | `view`      | Returns score, verdict, and 5 individual bool flags |
+| `getRecentScores(uint256, uint256)` | `view`      | Paginated list of recently scored referenda         |
+| `getStats()`                        | `view`      | Total scored, high risk count                       |
+| `updateInferenceContract(address)`  | `onlyOwner` | Update PVM inference contract address               |
 
 ### FenrirInference (PVM/Rust)
 
 Rust contract compiled to RISC-V, deployed as a PolkaVM contract.
 
-| Function              | Description                                              |
-| --------------------- | -------------------------------------------------------- |
-| `score_proposal(...)` | Takes 7 feature inputs, returns `(score: u8, flags: u8)` |
+| Function              | Description                                                         |
+| --------------------- | ------------------------------------------------------------------- |
+| `score_proposal(...)` | Takes 6 feature inputs, returns packed `u64` (score << 32 \| flags) |
 
-### Precompile Integrations
+### Tests
 
-| Precompile | Address  | Usage                                          |
-| ---------- | -------- | ---------------------------------------------- |
-| Governance | `0x0807` | `getReferendumInfo()`, `getProposerHistory()`  |
-| Asset Hub  | `0x0808` | `getNativeAssetRequest()` — DOT threshold flag |
-| XCM        | `0x0803` | Score broadcast to parachains (stretch goal)   |
+15 test functions, 100% pass rate:
+
+```
+forge test -vvv
+✓ test_ScoresActiveProposal
+✓ test_CannotScoreTwice
+✓ test_RejectsNonActiveProposal
+✓ test_ScoreDetailsDecoded
+✓ test_EmitsScorePublished
+✓ test_HighRiskInputsProduceHighScore
+✓ test_CleanInputsProduceLowScore
+✓ test_InferenceFailureGraceful
+✓ test_OnlyOwnerCanUpdateInference
+✓ test_OwnerCanUpdateInference
+✓ test_CannotSetZeroInference
+✓ test_ConstructorRejectsZeroAddress
+✓ test_GetRecentScores
+✓ test_GetRecentScoresOffsetBeyondTotal
+✓ test_GetStats
+Suite result: ok. 15 passed; 0 failed; 0 skipped
+```
 
 ---
 
@@ -198,57 +194,50 @@ Rust contract compiled to RISC-V, deployed as a PolkaVM contract.
 
 ### Training Data
 
-Historical OpenGov proposals scraped from:
-
-- [Polkassembly API](https://polkadot.polkassembly.io/) — proposal metadata, outcomes
-- [Subsquare API](https://polkadot.subsquare.io/) — proposer history, voting data
-- On-chain data — block timestamps, wallet first activity
+Historical OpenGov proposals scraped from [Polkassembly API](https://api.polkassembly.io/api/v1).
 
 ### Feature Vector
 
-| Feature                | Type    | Description                                               |
-| ---------------------- | ------- | --------------------------------------------------------- |
-| `wallet_age_blocks`    | `int`   | Blocks since proposer's first on-chain activity           |
-| `dot_requested`        | `float` | DOT amount requested (18-decimal normalized)              |
-| `dot_ratio_to_avg`     | `float` | Requested / ecosystem average at submission time          |
-| `prior_approved`       | `int`   | Number of previously approved proposals                   |
-| `prior_total`          | `int`   | Total proposals ever submitted                            |
-| `approval_rate`        | `float` | `prior_approved / prior_total`                            |
-| `track_id`             | `int`   | OpenGov track (0=root, 1=whitelisted, 13=treasurer, etc.) |
-| `days_since_last_prop` | `int`   | Burst detection — rapid sequential submissions            |
+| Feature                | Type    | Description                                          |
+| ---------------------- | ------- | ---------------------------------------------------- |
+| `wallet_age_blocks`    | `int`   | Blocks since proposer's first on-chain activity      |
+| `requested_dot`        | `float` | DOT amount requested (18-decimal normalised)         |
+| `dot_ratio_to_avg`     | `float` | Requested / ecosystem median at submission time      |
+| `prior_approved`       | `int`   | Number of previously approved proposals              |
+| `prior_total`          | `int`   | Total proposals ever submitted                       |
+| `approval_rate`        | `float` | `prior_approved / prior_total` × 100                 |
+| `track_id`             | `int`   | OpenGov track (0=root, 13=treasurer, 34=big_spender) |
+| `days_since_last_prop` | `int`   | Burst detection — rapid sequential submissions       |
 
 ### Model
 
-- **Algorithm:** Decision Tree Classifier (`max_depth=5`)
-- **Target:** 70%+ precision on high-risk class
-- **Export:** Weights hardcoded as Rust constants in `inference/src/weights.rs`
+- **Algorithm:** Decision Tree Classifier (`max_depth=6`, `min_samples_leaf=8`, `class_weight="balanced"`)
+- **Target:** 65%+ precision on high-risk class
+- **Export:** Weights hardcoded as Rust constants via `export_weights.py` → `inference/src/weights.rs`
+- **Format:** `joblib` serialisation
 
 ### Pipeline Commands
 
 ```bash
-# Scrape proposal data
-python ml/scraper.py --output ml/data/proposals.csv
-
-# Train model
-python ml/train.py --data ml/data/proposals.csv --output ml/data/model.pkl
-
-# Export weights to Rust
-python ml/export_weights.py --model ml/data/model.pkl --output inference/src/weights.rs
+cd ml
+python scraper.py        # Scrape proposals → data/proposals.csv
+python train.py          # Train model → model.joblib + inference/src/weights.rs
+python evaluate.py       # Evaluate model performance
 ```
 
 ---
 
 ## Frontend
 
-React + Vite dashboard for interacting with Fenrir scores.
+React + Vite dashboard. Dark, serious, trustworthy design. System fonts only.
 
-### Pages
+### Three Views
 
-| Page                | Description                                                                                |
-| ------------------- | ------------------------------------------------------------------------------------------ |
-| **Live Proposals**  | Feed of active proposals with Fenrir risk scores and flags                                 |
-| **Proposal Detail** | Deep-dive into a scored proposal — flag breakdown, proposer history, on-chain verification |
-| **Stats**           | Aggregate metrics — total scored, risk distribution, DOT flagged                           |
+| View       | Description                                                           |
+| ---------- | --------------------------------------------------------------------- |
+| **Feed**   | Scored proposals with risk bars, active flags, filter + search        |
+| **Detail** | Score with count-up animation, ALL 5 flags (triggered + reassurances) |
+| **Stats**  | Total scored, high risk count, DOT protected                          |
 
 ### Running Locally
 
@@ -256,13 +245,14 @@ React + Vite dashboard for interacting with Fenrir scores.
 cd frontend
 npm install
 npm run dev
+# Opens at http://localhost:5173
 ```
 
 ### Environment Variables
 
 ```env
-VITE_RPC_URL=https://westend-rpc.polkadot.io
-VITE_SCORER_ADDRESS=0x...
+VITE_SCORER_ADDRESS=0x...        # Deployed FenrirScorer address
+VITE_RPC_URL=https://westend-asset-hub-eth-rpc.polkadot.io
 VITE_CHAIN_ID=420420421
 ```
 
@@ -270,81 +260,37 @@ VITE_CHAIN_ID=420420421
 
 ## Deployment
 
-### Testnet (Westend)
-
-```bash
-# Deploy PVM inference contract
-cd inference
-cargo build --target riscv32emac-unknown-none-polkavm --release
-cast send --rpc-url $WESTEND_RPC \
-  --private-key $PRIVATE_KEY \
-  --create $(cat target/riscv32emac-unknown-none-polkavm/release/fenrir_inference.polkavm | xxd -p)
-
-# Deploy Solidity scorer contract
-cd contracts
-forge script script/Deploy.s.sol --rpc-url $WESTEND_RPC --private-key $PRIVATE_KEY --broadcast
-```
-
-### Contract Addresses (Testnet)
+### Contract Addresses (Westend Testnet)
 
 | Contract        | Network | Address |
 | --------------- | ------- | ------- |
 | FenrirScorer    | Westend | `TBD`   |
 | FenrirInference | Westend | `TBD`   |
 
+### Deploy Commands
+
+```bash
+# Set env variables
+cp .env.example .env
+# Edit .env with your PRIVATE_KEY and INFERENCE_CONTRACT address
+
+# Deploy FenrirScorer
+forge script contracts/script/Deploy.s.sol \
+  --rpc-url $WESTEND_EVM_RPC \
+  --broadcast \
+  --private-key $PRIVATE_KEY \
+  -vvvv
+```
+
 ---
 
 ## Why Polkadot
 
-Fenrir **cannot exist on Ethereum**. Here's why:
+Fenrir **cannot exist on Ethereum**. Three reasons:
 
-| Component                   | Why Not Ethereum                                                                     |
-| --------------------------- | ------------------------------------------------------------------------------------ |
-| **Governance Precompile**   | Ethereum has no on-chain governance. No precompile exists.                           |
-| **PVM Rust Inference**      | EVM is a 256-bit stack machine. Rust ML inference is prohibitively expensive in gas. |
-| **Asset Hub DOT Threshold** | Ethereum has no native treasury or governance asset management.                      |
-| **XCM Score Broadcast**     | Ethereum has no native cross-chain messaging at the protocol layer.                  |
-| **Unified Address Space**   | EVM + PVM contracts coexisting and calling each other — impossible on Ethereum.      |
-
----
-
-## Polkadot Integration Categories
-
-| Integration                  | How Fenrir Uses It                                                 |
-| ---------------------------- | ------------------------------------------------------------------ |
-| ✅ **PVM Rust Interop**      | ML inference runs in Rust compiled to RISC-V, called from Solidity |
-| ✅ **Governance Precompile** | Live proposal data fetched on-chain — no subgraph, no API          |
-| ✅ **Asset Hub Precompile**  | Flags proposals requesting native assets above anomaly threshold   |
-| ✅ **XCM Precompile**        | Score broadcast to parachain subscribers (stretch goal)            |
-
----
-
-## Roadmap
-
-### Phase 1 — Hackathon (Current)
-
-- Core scoring contracts (EVM + PVM)
-- ML model trained on 200+ proposals
-- Frontend dashboard
-- Testnet deployment
-
-### Phase 2 — Accuracy Improvement
-
-- Train on 1,000+ proposals with advanced feature engineering
-- Content similarity via IPFS text hashing
-- Community labeling DAO for training data quality
-
-### Phase 3 — Ecosystem Integration
-
-- Nova Wallet / SubWallet plugin — Fenrir score inline during voting
-- Polkassembly & Subsquare integration
-- Automatic scoring on every new proposal submission
-
-### Phase 4 — DAO Governance
-
-- Model weight updates governed by on-chain DOT vote
-- Bounty system for catching high-risk proposals
-- Fenrir as a **permanent public good**, funded by W3F treasury
+1. **Governance precompile** — Ethereum has no on-chain governance readable via precompile. Fenrir reads live proposal data with zero external APIs.
+2. **PVM Rust inference** — PolkaVM runs Rust ML inference natively at 64-bit word granularity. The same logic on EVM's 256-bit stack machine would cost 10–100× more gas.
+3. **Unified address space** — EVM + PVM contracts coexist and call each other on Polkadot Hub. Solidity → Rust cross-contract calls are impossible on Ethereum.
 
 ---
 
@@ -355,45 +301,55 @@ fenrir/
 ├── contracts/                         # Solidity smart contracts (Foundry)
 │   ├── src/
 │   │   ├── FenrirScorer.sol          # Main EVM scoring contract
-│   │   └── interfaces/
-│   │       ├── IGovernancePrecompile.sol
-│   │       ├── IAssetHubPrecompile.sol
-│   │       └── IFenrirInference.sol
+│   │   ├── interfaces/
+│   │   │   ├── IGovernancePrecompile.sol
+│   │   │   ├── IFenrirInference.sol
+│   │   │   ├── IAssetHubPrecompile.sol
+│   │   │   └── IXCMPrecompile.sol
+│   │   └── mocks/
+│   │       ├── MockGovernance.sol
+│   │       └── MockAssetHub.sol
 │   ├── test/
-│   │   └── FenrirScorer.t.sol        # Foundry test suite
+│   │   └── FenrirScorer.t.sol        # 15 Foundry tests
 │   └── script/
 │       └── Deploy.s.sol              # Deployment script
 │
 ├── inference/                         # PVM Rust inference contract
 │   ├── src/
-│   │   ├── lib.rs                    # ML classifier logic
-│   │   └── weights.rs                # Exported model weights
+│   │   ├── lib.rs                    # ML classifier (no_std, no_main)
+│   │   └── weights.rs                # AUTO-GENERATED model weights
 │   ├── Cargo.toml
-│   └── .cargo/config.toml            # RISC-V target configuration
+│   └── .cargo/config.toml            # riscv32emac-unknown-none-polkavm
 │
 ├── ml/                                # Off-chain ML training pipeline
-│   ├── scraper.py                    # Polkassembly data collector
-│   ├── train.py                      # Model training script
+│   ├── scraper.py                    # Polkassembly data collector (httpx)
+│   ├── train.py                      # Decision tree trainer (joblib)
 │   ├── export_weights.py             # Python → Rust weight exporter
-│   ├── requirements.txt              # Python dependencies
+│   ├── evaluate.py                   # Model evaluation script
+│   ├── requirements.txt
 │   └── data/
-│       └── proposals.csv             # Training dataset
+│       └── proposals.csv
 │
 ├── frontend/                          # React + Vite dashboard
 │   ├── src/
+│   │   ├── constants/
+│   │   │   └── contracts.js          # ABI, risk levels, flag defs
 │   │   ├── components/
 │   │   │   ├── ProposalCard.jsx
 │   │   │   ├── ScoreDisplay.jsx
 │   │   │   ├── FlagBreakdown.jsx
-│   │   │   └── StatsPanel.jsx
+│   │   │   ├── StatsBanner.jsx
+│   │   │   └── SkeletonCard.jsx
 │   │   ├── hooks/
 │   │   │   └── useFenrir.js
-│   │   └── App.jsx
+│   │   ├── App.jsx
+│   │   ├── main.jsx
+│   │   └── index.css
 │   └── package.json
 │
-├── BASE_INSTRUCTIONS.md               # Complete technical blueprint
-├── ARCHITECTURE.md                    # Architecture documentation
-└── README.md                          # This file
+├── .env.example
+├── foundry.toml
+└── README.md
 ```
 
 ---
@@ -401,16 +357,6 @@ fenrir/
 ## License
 
 MIT
-
----
-
-## Acknowledgments
-
-- [Polkadot](https://polkadot.network/) — Governance precompiles, PVM, XCM
-- [Parity Technologies](https://www.parity.io/) — Revive toolchain, PolkaVM
-- [Web3 Foundation](https://web3.foundation/) — Ecosystem support
-- [Polkassembly](https://polkassembly.io/) — Governance data API
-- [Subsquare](https://subsquare.io/) — Proposal analytics
 
 ---
 

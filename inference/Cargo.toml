@@ -2,7 +2,6 @@
 name = "fenrir-inference"
 version = "0.1.0"
 edition = "2021"
-description = "On-chain ML inference contract for Fenrir risk scoring"
 
 [dependencies]
 polkavm-derive = "0.14"
@@ -10,3 +9,5 @@ polkavm-derive = "0.14"
 [profile.release]
 opt-level = "z"
 lto = true
+codegen-units = 1
+panic = "abort"

@@ -1,386 +1,262 @@
 // SPDX-License-Identifier: MIT
-// ======================================================================
-// FenrirScorer.sol — Main EVM Scoring Contract
-// ======================================================================
-// The orchestrator contract for the Fenrir on-chain risk intelligence
-// system. Deployed on Polkadot Hub's EVM layer, it coordinates between
-// the governance precompile, Asset Hub precompile, and the PVM Rust
-// inference contract to produce transparent, verifiable risk scores
-// for OpenGov treasury proposals.
-//
-// This contract is the public-facing API of Fenrir. Any wallet, dApp,
-// or smart contract in the Polkadot ecosystem can call getScore() to
-// retrieve a proposal's risk assessment.
-//
-// See BASE_INSTRUCTIONS.md Section 4.1 for the full specification.
-// ======================================================================
 pragma solidity ^0.8.20;
 
-import "./interfaces/IGovernancePrecompile.sol";
-import "./interfaces/IAssetHubPrecompile.sol";
-import "./interfaces/IFenrirInference.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Ownable2Step, Ownable} from "@openzeppelin/contracts/access/Ownable2Step.sol";
+import {IGovernancePrecompile} from "./interfaces/IGovernancePrecompile.sol";
+import {IFenrirInference} from "./interfaces/IFenrirInference.sol";
 
 /// @title FenrirScorer
-/// @author Fenrir Team — Polkadot Solidity Hackathon 2026
-/// @notice On-chain risk scoring for OpenGov treasury proposals.
-/// @dev Integrates governance precompile, Asset Hub precompile, and
-///      PVM Rust inference to produce explainable risk scores (0-100).
-contract FenrirScorer {
+/// @notice On-chain OpenGov proposal risk scorer powered by PVM ML inference.
+/// @dev Reads proposals via governance precompile, calls Rust inference via PVM.
+///      Part of Polkadot Solidity Hackathon 2026 — Track 2: PVM Smart Contracts.
+contract FenrirScorer is ReentrancyGuard, Ownable2Step {
 
-    // ==================================================================
-    // Precompile Addresses (Polkadot Hub Native)
-    // ==================================================================
+    // =========================================================================
+    // CONSTANTS
+    // =========================================================================
 
-    /// @notice Governance precompile — provides referendum and proposer data.
-    IGovernancePrecompile constant GOVERNANCE =
+    IGovernancePrecompile public constant GOVERNANCE =
         IGovernancePrecompile(0x0000000000000000000000000000000000000807);
 
-    /// @notice Asset Hub precompile — provides native DOT request amounts.
-    IAssetHubPrecompile constant ASSET_HUB =
-        IAssetHubPrecompile(0x0000000000000000000000000000000000000808);
+    // Risk flag bit positions — must match inference/src/lib.rs exactly
+    uint8 public constant FLAG_NEW_WALLET       = 0x01;
+    uint8 public constant FLAG_LARGE_REQUEST    = 0x02;
+    uint8 public constant FLAG_NO_HISTORY       = 0x04;
+    uint8 public constant FLAG_LOW_APPROVAL     = 0x08;
+    uint8 public constant FLAG_BURST            = 0x10;
+    uint8 public constant FLAG_INFERENCE_FAILED = 0x20;
 
-    /// @notice PVM Rust inference contract — runs the ML classifier.
+    // Risk verdict thresholds
+    uint8 public constant THRESHOLD_HIGH        = 75;
+    uint8 public constant THRESHOLD_MODERATE    = 50;
+    uint8 public constant THRESHOLD_LOW         = 25;
+
+    // =========================================================================
+    // STATE
+    // =========================================================================
+
     IFenrirInference public inferenceContract;
 
-    // ==================================================================
-    // Score Storage
-    // ==================================================================
-
-    /// @notice Structure holding a proposal's risk assessment.
-    /// @param score The numerical risk score (0 = minimal, 100 = high).
-    /// @param flags Bitmask of triggered risk flags (see FLAG_* constants).
-    /// @param scoredAtBlock The block number at which scoring occurred.
-    /// @param exists Whether this proposal has been scored.
-    struct FenrirScore {
-        uint8 score;
-        uint8 flags;
-        uint256 scoredAtBlock;
-        bool exists;
+    struct Score {
+        uint8   value;           // 0–100
+        uint8   flags;           // bitmask
+        uint64  scoredAtBlock;
+        uint128 requestedDOT;   // snapshot at time of scoring
+        bool    exists;
     }
 
-    /// @notice Mapping from referendum index to its Fenrir score.
-    mapping(uint32 => FenrirScore) public scores;
-
-    /// @notice Total number of proposals scored by this contract.
+    mapping(uint32 => Score) public scores;
+    uint32[] public scoredReferenda;
     uint256 public totalScored;
+    uint256 public totalHighRiskFound;
 
-    // ==================================================================
-    // Flag Constants (Explainability Layer)
-    // ==================================================================
-    // Each flag corresponds to a specific risk indicator. When a flag
-    // is set in the bitmask, it means the corresponding risk condition
-    // was detected during scoring. This is Fenrir's core value
-    // proposition — not just a score, but an explanation of *why*.
+    // =========================================================================
+    // EVENTS
+    // =========================================================================
 
-    /// @notice Wallet is younger than ~83 days (50,000 blocks).
-    uint8 constant FLAG_NEW_WALLET = 0x01;
-
-    /// @notice Request exceeds 3x the ecosystem average DOT amount.
-    uint8 constant FLAG_LARGE_REQUEST = 0x02;
-
-    /// @notice Proposer has no previously approved proposals.
-    uint8 constant FLAG_NO_TRACK_HISTORY = 0x04;
-
-    /// @notice Proposal content is similar to a previously rejected one.
-    uint8 constant FLAG_CONTENT_SIMILARITY = 0x08;
-
-    /// @notice Multiple proposals submitted in a short time window.
-    uint8 constant FLAG_BURST_ACTIVITY = 0x10;
-
-    // ==================================================================
-    // Ecosystem Baseline Configuration
-    // ==================================================================
-
-    /// @notice The ecosystem average DOT request amount (in Planck).
-    /// @dev Updated via governance to reflect the current ecosystem norm.
-    ///      Defaults to 5000 DOT (5000 * 10^18 Planck).
-    uint256 public baselineAvgDOT = 5000 ether;
-
-    /// @notice Contract owner — authorised to update baseline parameters.
-    address public owner;
-
-    /// @notice Whether the contract is paused for emergency situations.
-    bool public paused;
-
-    /// @notice Reentrancy guard state variable.
-    bool private _locked;
-
-    // ==================================================================
-    // Events
-    // ==================================================================
-
-    /// @notice Emitted when a proposal is scored.
-    /// @param refIndex The referendum index that was scored.
-    /// @param proposer The address of the proposal's author.
-    /// @param score The computed risk score (0-100).
-    /// @param flags The triggered risk flag bitmask.
-    /// @param requestedDOT The amount of DOT requested by the proposal.
     event ScorePublished(
-        uint32 indexed refIndex,
+        uint32  indexed refIndex,
         address indexed proposer,
-        uint8 score,
-        uint8 flags,
-        uint256 requestedDOT
+        uint8           score,
+        uint8           flags,
+        uint128         requestedDOT,
+        uint64          scoredAtBlock
     );
 
-    /// @notice Emitted when the ecosystem baseline is updated.
-    /// @param oldBaseline The previous baseline average.
-    /// @param newBaseline The newly set baseline average.
-    event BaselineUpdated(uint256 oldBaseline, uint256 newBaseline);
+    event InferenceContractUpdated(address oldContract, address newContract);
+    event InferenceFailure(uint32 indexed refIndex);
 
-    // ==================================================================
-    // Modifiers
-    // ==================================================================
+    // =========================================================================
+    // ERRORS
+    // =========================================================================
 
-    /// @notice Restricts access to the contract owner.
-    modifier onlyOwner() {
-        require(msg.sender == owner, "Fenrir: caller is not the owner");
-        _;
-    }
+    error AlreadyScored(uint32 refIndex);
+    error NotActiveReferendum(uint32 refIndex, uint8 status);
+    error InferenceCallFailed();
+    error InvalidInferenceContract();
 
-    /// @notice Prevents reentrancy attacks on state-changing functions.
-    modifier nonReentrant() {
-        require(!_locked, "Fenrir: reentrant call detected");
-        _locked = true;
-        _;
-        _locked = false;
-    }
+    // =========================================================================
+    // CONSTRUCTOR
+    // =========================================================================
 
-    /// @notice Ensures the contract is not paused.
-    modifier whenNotPaused() {
-        require(!paused, "Fenrir: contract is paused");
-        _;
-    }
-
-    // ==================================================================
-    // Constructor
-    // ==================================================================
-
-    /// @notice Deploy the FenrirScorer contract.
-    /// @param _inferenceContract Address of the deployed PVM inference contract.
-    constructor(address _inferenceContract) {
-        require(
-            _inferenceContract != address(0),
-            "Fenrir: inference contract cannot be zero address"
-        );
+    constructor(address _inferenceContract) Ownable(msg.sender) {
+        if (_inferenceContract == address(0)) revert InvalidInferenceContract();
         inferenceContract = IFenrirInference(_inferenceContract);
-        owner = msg.sender;
     }
 
-    // ==================================================================
-    // Core Scoring Function
-    // ==================================================================
+    // =========================================================================
+    // CORE SCORING
+    // =========================================================================
 
-    /// @notice Score an active OpenGov referendum.
-    /// @dev This function performs the complete scoring pipeline:
-    ///      1. Fetches proposal data from the governance precompile
-    ///      2. Fetches proposer history from the governance precompile
-    ///      3. Computes feature values from the raw data
-    ///      4. Calls the PVM Rust inference contract for ML scoring
-    ///      5. Stores the result on-chain
-    ///      6. Emits the ScorePublished event
-    /// @param refIndex The referendum index to score.
-    /// @return score The computed risk score (0-100).
+    /// @notice Score an active referendum.
+    /// @param refIndex The referendum index in OpenGov.
+    /// @return score Risk score 0–100 (higher = riskier).
     function scoreReferendum(uint32 refIndex)
         external
         nonReentrant
-        whenNotPaused
         returns (uint8 score)
     {
-        // Ensure we haven't already scored this proposal.
-        require(!scores[refIndex].exists, "Fenrir: already scored");
+        if (scores[refIndex].exists) revert AlreadyScored(refIndex);
 
-        // Fetch proposal data and score it via the internal helper.
-        // Split into a separate function to avoid stack-too-deep.
-        (uint8 riskScore, uint8 flagBitmask, address proposer, uint256 requestedDOT) =
-            _fetchAndScore(refIndex);
+        // Fetch proposal data from governance precompile
+        IGovernancePrecompile.ReferendumInfo memory info =
+            GOVERNANCE.getReferendumInfo(refIndex);
 
-        // Store the immutable on-chain result
-        scores[refIndex] = FenrirScore({
-            score: riskScore,
-            flags: flagBitmask,
-            scoredAtBlock: block.number,
-            exists: true
+        if (info.status != 0) revert NotActiveReferendum(refIndex, info.status);
+
+        // Fetch proposer history
+        IGovernancePrecompile.ProposerHistory memory history =
+            GOVERNANCE.getProposerHistory(info.proposer);
+
+        // Compute wallet age in blocks
+        uint64 walletAgeBlocks = info.submittedBlock > history.firstActivityBlock
+            ? uint64(info.submittedBlock - history.firstActivityBlock)
+            : 0;
+
+        // Compute days since last proposal (~14400 blocks per day at 6s/block)
+        uint32 daysSinceLast = history.lastProposalBlock > 0
+            && info.submittedBlock > history.lastProposalBlock
+            ? uint32((info.submittedBlock - history.lastProposalBlock) / 14400)
+            : 999;
+
+        // Call PVM Rust inference — wrapped in try/catch per Security.md §1.6
+        uint8 riskScore;
+        uint8 flagBitmask;
+        try inferenceContract.scoreProposal(
+            walletAgeBlocks,
+            uint64(info.requestedDOT),
+            history.approvedCount,
+            history.totalProposals,
+            daysSinceLast,
+            info.trackId
+        ) returns (uint8 _score, uint8 _flags) {
+            riskScore = _score;
+            flagBitmask = _flags;
+        } catch {
+            // Inference failed — store neutral score with failure flag.
+            // This prevents a broken inference contract from blocking all scoring.
+            riskScore = 50;
+            flagBitmask = FLAG_INFERENCE_FAILED;
+            emit InferenceFailure(refIndex);
+        }
+
+        // Persist the result
+        scores[refIndex] = Score({
+            value:        riskScore,
+            flags:        flagBitmask,
+            scoredAtBlock: uint64(block.number),
+            requestedDOT: uint128(info.requestedDOT),
+            exists:       true
         });
 
+        scoredReferenda.push(refIndex);
         totalScored++;
+        if (riskScore >= THRESHOLD_HIGH) totalHighRiskFound++;
 
-        // Broadcast the scoring event
-        emit ScorePublished(refIndex, proposer, riskScore, flagBitmask, requestedDOT);
+        emit ScorePublished(
+            refIndex,
+            info.proposer,
+            riskScore,
+            flagBitmask,
+            uint128(info.requestedDOT),
+            uint64(block.number)
+        );
 
         return riskScore;
     }
 
-    /// @dev Internal helper that fetches precompile data and calls inference.
-    ///      Separated from scoreReferendum to keep the EVM stack shallow.
-    function _fetchAndScore(uint32 refIndex)
-        internal
-        view
-        returns (uint8 riskScore, uint8 flagBitmask, address proposer, uint256 requestedDOT)
-    {
-        // Step 1: Fetch proposal data from governance precompile
-        uint8 status;
-        uint256 submittedAt;
-        (status, proposer, requestedDOT, submittedAt, ) = GOVERNANCE.getReferendumInfo(refIndex);
+    // =========================================================================
+    // VIEW FUNCTIONS
+    // =========================================================================
 
-        require(status == 0, "Fenrir: only score active proposals");
-
-        // Step 2: Fetch proposer history and compute wallet age
-        uint256 walletAge;
-        {
-            (uint32 totalProposals, uint32 approvedCount, uint256 firstActivity) =
-                GOVERNANCE.getProposerHistory(proposer);
-
-            walletAge = submittedAt > firstActivity ? submittedAt - firstActivity : 0;
-
-            // Step 3: Cross-contract call to PVM Rust inference
-            (riskScore, flagBitmask) = inferenceContract.scoreProposal(
-                walletAge,
-                requestedDOT,
-                baselineAvgDOT,
-                approvedCount,
-                totalProposals,
-                uint256(keccak256(abi.encodePacked(refIndex))),
-                uint8(refIndex % 16)
-            );
-        }
-    }
-
-    // ==================================================================
-    // Public Read Functions
-    // ==================================================================
-
-    /// @notice Retrieve the full risk assessment for a scored proposal.
-    /// @param refIndex The referendum index to look up.
-    /// @return score The numerical risk score (0-100).
-    /// @return verdict A human-readable risk verdict string.
-    /// @return activeFlags An array of human-readable flag descriptions.
-    function getScore(uint32 refIndex)
-        external
-        view
+    /// @notice Get full score details with human-readable verdict and decoded flags.
+    function getScoreDetails(uint32 refIndex)
+        external view
         returns (
-            uint8 score,
+            uint8   score,
             string memory verdict,
-            string[] memory activeFlags
+            bool    flagNewWallet,
+            bool    flagLargeRequest,
+            bool    flagNoHistory,
+            bool    flagLowApproval,
+            bool    flagBurst,
+            uint64  scoredAtBlock
         )
     {
-        FenrirScore memory s = scores[refIndex];
-        require(s.exists, "Fenrir: not yet scored");
+        Score memory s = scores[refIndex];
+        require(s.exists, "Not scored yet");
 
-        score = s.score;
-        verdict = _verdict(s.score);
-        activeFlags = _decodeFlags(s.flags);
-    }
-
-    /// @notice Check whether a referendum has been scored.
-    /// @param refIndex The referendum index to check.
-    /// @return exists True if the proposal has been scored.
-    function isScored(uint32 refIndex) external view returns (bool exists) {
-        return scores[refIndex].exists;
-    }
-
-    /// @notice Retrieve the raw score data for a referendum.
-    /// @param refIndex The referendum index to look up.
-    /// @return score The numerical risk score.
-    /// @return flags The raw flag bitmask.
-    /// @return scoredAtBlock The block at which scoring occurred.
-    function getRawScore(uint32 refIndex)
-        external
-        view
-        returns (uint8 score, uint8 flags, uint256 scoredAtBlock)
-    {
-        FenrirScore memory s = scores[refIndex];
-        require(s.exists, "Fenrir: not yet scored");
-
-        return (s.score, s.flags, s.scoredAtBlock);
-    }
-
-    // ==================================================================
-    // Administrative Functions
-    // ==================================================================
-
-    /// @notice Update the ecosystem average DOT request baseline.
-    /// @dev This should be called periodically to reflect the current
-    ///      ecosystem norm. Only the contract owner may call this.
-    /// @param newAvg The new baseline average DOT amount (in Planck).
-    function updateBaseline(uint256 newAvg) external onlyOwner {
-        require(newAvg > 0, "Fenrir: baseline must be positive");
-
-        uint256 oldBaseline = baselineAvgDOT;
-        baselineAvgDOT = newAvg;
-
-        emit BaselineUpdated(oldBaseline, newAvg);
-    }
-
-    /// @notice Pause or unpause the contract for emergency situations.
-    /// @param _paused Whether to pause (true) or unpause (false).
-    function setPaused(bool _paused) external onlyOwner {
-        paused = _paused;
-    }
-
-    /// @notice Transfer ownership to a new address.
-    /// @param newOwner The address to transfer ownership to.
-    function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "Fenrir: new owner cannot be zero address");
-        owner = newOwner;
-    }
-
-    /// @notice Update the inference contract address.
-    /// @dev Use with caution — this changes the ML model used for scoring.
-    /// @param _inferenceContract The new inference contract address.
-    function updateInferenceContract(address _inferenceContract) external onlyOwner {
-        require(
-            _inferenceContract != address(0),
-            "Fenrir: inference contract cannot be zero address"
+        return (
+            s.value,
+            _verdictString(s.value),
+            s.flags & FLAG_NEW_WALLET    != 0,
+            s.flags & FLAG_LARGE_REQUEST != 0,
+            s.flags & FLAG_NO_HISTORY    != 0,
+            s.flags & FLAG_LOW_APPROVAL  != 0,
+            s.flags & FLAG_BURST         != 0,
+            s.scoredAtBlock
         );
-        inferenceContract = IFenrirInference(_inferenceContract);
     }
 
-    // ==================================================================
-    // Internal Helper Functions
-    // ==================================================================
+    /// @notice Get paginated list of recently scored referenda (newest first).
+    function getRecentScores(uint256 offset, uint256 limit)
+        external view
+        returns (uint32[] memory indices, uint8[] memory scoreValues)
+    {
+        uint256 total = scoredReferenda.length;
+        if (offset >= total) return (new uint32[](0), new uint8[](0));
 
-    /// @notice Convert a numerical score to a human-readable verdict.
-    /// @param _score The risk score to classify.
-    /// @return A verdict string: MINIMAL RISK, LOW RISK, MODERATE RISK, or HIGH RISK.
-    function _verdict(uint8 _score) internal pure returns (string memory) {
-        if (_score >= 75) return "HIGH RISK";
-        if (_score >= 50) return "MODERATE RISK";
-        if (_score >= 25) return "LOW RISK";
+        uint256 end = offset + limit > total ? total : offset + limit;
+        uint256 count = end - offset;
+
+        indices     = new uint32[](count);
+        scoreValues = new uint8[](count);
+
+        for (uint256 i = 0; i < count; i++) {
+            uint32 idx = scoredReferenda[total - 1 - offset - i]; // newest first
+            indices[i]     = idx;
+            scoreValues[i] = scores[idx].value;
+        }
+    }
+
+    /// @notice Returns global scoring statistics.
+    function getStats()
+        external view
+        returns (
+            uint256 total,
+            uint256 highRisk,
+            uint256 moderate,
+            uint256 low
+        )
+    {
+        total    = totalScored;
+        highRisk = totalHighRiskFound;
+        // Moderate and low computed from events off-chain for gas efficiency
+        moderate = 0;
+        low      = 0;
+    }
+
+    // =========================================================================
+    // ADMIN
+    // =========================================================================
+
+    /// @notice Update the PVM inference contract address.
+    /// @dev Only the contract owner may call this. Two-step ownership via Ownable2Step.
+    function updateInferenceContract(address newContract) external onlyOwner {
+        if (newContract == address(0)) revert InvalidInferenceContract();
+        emit InferenceContractUpdated(address(inferenceContract), newContract);
+        inferenceContract = IFenrirInference(newContract);
+    }
+
+    // =========================================================================
+    // INTERNAL
+    // =========================================================================
+
+    function _verdictString(uint8 score) internal pure returns (string memory) {
+        if (score >= THRESHOLD_HIGH)     return "HIGH RISK";
+        if (score >= THRESHOLD_MODERATE) return "MODERATE RISK";
+        if (score >= THRESHOLD_LOW)      return "LOW RISK";
         return "MINIMAL RISK";
-    }
-
-    /// @notice Decode a flag bitmask into human-readable descriptions.
-    /// @param flags The flag bitmask to decode.
-    /// @return An array of flag description strings.
-    function _decodeFlags(uint8 flags) internal pure returns (string[] memory) {
-        // Allocate the maximum possible array size
-        string[] memory result = new string[](5);
-        uint8 count = 0;
-
-        // Check each flag bit and add the corresponding description
-        if (flags & FLAG_NEW_WALLET != 0) {
-            result[count++] = "New wallet: no established history";
-        }
-        if (flags & FLAG_LARGE_REQUEST != 0) {
-            result[count++] = "Request exceeds 3x ecosystem average";
-        }
-        if (flags & FLAG_NO_TRACK_HISTORY != 0) {
-            result[count++] = "No prior approved proposals";
-        }
-        if (flags & FLAG_CONTENT_SIMILARITY != 0) {
-            result[count++] = "Content similar to rejected proposal";
-        }
-        if (flags & FLAG_BURST_ACTIVITY != 0) {
-            result[count++] = "Multiple proposals submitted rapidly";
-        }
-
-        // Trim the array to the actual number of active flags
-        string[] memory trimmed = new string[](count);
-        for (uint8 i = 0; i < count; i++) {
-            trimmed[i] = result[i];
-        }
-
-        return trimmed;
     }
 }

@@ -1,5 +1,5 @@
 [build]
 target = "riscv32emac-unknown-none-polkavm"
 
-[unstable]
-build-std = ["core", "alloc"]
+[target.riscv32emac-unknown-none-polkavm]
+rustflags = ["-C", "target-feature=+m"]
