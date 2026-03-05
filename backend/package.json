@@ -1,0 +1,20 @@
+{
+  "name": "fenrir-auto-scorer",
+  "version": "1.0.0",
+  "description": "Fenrir 24/7 auto-scoring service for Polkadot OpenGov",
+  "main": "autoScorer.ts",
+  "scripts": {
+    "start": "npx ts-node autoScorer.ts",
+    "dev": "npx ts-node --watch autoScorer.ts"
+  },
+  "dependencies": {
+    "@polkadot/api": "^10.0.0",
+    "dotenv": "^16.0.0",
+    "ethers": "^6.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0"
+  }
+}
