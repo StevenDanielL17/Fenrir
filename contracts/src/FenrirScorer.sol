@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.19;
 
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Ownable2Step, Ownable} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {IGovernancePrecompile} from "./interfaces/IGovernancePrecompile.sol";
 import {IFenrirInference} from "./interfaces/IFenrirInference.sol";
+import {IAssetHubPrecompile} from "./interfaces/IAssetHubPrecompile.sol";
 
 /// @title FenrirScorer
 /// @notice On-chain OpenGov proposal risk scorer powered by PVM ML inference.
@@ -18,6 +19,13 @@ contract FenrirScorer is ReentrancyGuard, Ownable2Step {
 
     IGovernancePrecompile public constant GOVERNANCE =
         IGovernancePrecompile(0x0000000000000000000000000000000000000807);
+
+    IAssetHubPrecompile public constant ASSET_HUB =
+        IAssetHubPrecompile(0x0000000000000000000000000000000000000808);
+
+    /// @dev 3x the ecosystem DOT average (30,000 DOT at 1e18 = 3e22 Planck).
+    ///      Any proposal requesting more than this via Asset Hub also triggers FLAG_LARGE_REQUEST.
+    uint256 public constant LARGE_REQUEST_THRESHOLD_PLANCK = 30_000 * 1e18;
 
     // Risk flag bit positions — must match inference/src/lib.rs exactly
     uint8 public constant FLAG_NEW_WALLET       = 0x01;
@@ -42,7 +50,7 @@ contract FenrirScorer is ReentrancyGuard, Ownable2Step {
         uint8   value;           // 0–100
         uint8   flags;           // bitmask
         uint64  scoredAtBlock;
-        uint128 requestedDOT;   // snapshot at time of scoring
+        uint128 requestedDot;   // snapshot at time of scoring
         bool    exists;
     }
 
@@ -50,6 +58,8 @@ contract FenrirScorer is ReentrancyGuard, Ownable2Step {
     uint32[] public scoredReferenda;
     uint256 public totalScored;
     uint256 public totalHighRiskFound;
+    uint256 public totalModerate;
+    uint256 public totalLow;
 
     // =========================================================================
     // EVENTS
@@ -60,7 +70,7 @@ contract FenrirScorer is ReentrancyGuard, Ownable2Step {
         address indexed proposer,
         uint8           score,
         uint8           flags,
-        uint128         requestedDOT,
+        uint128         requestedDot,
         uint64          scoredAtBlock
     );
 
@@ -121,18 +131,25 @@ contract FenrirScorer is ReentrancyGuard, Ownable2Step {
             : 999;
 
         // Call PVM Rust inference — wrapped in try/catch per Security.md §1.6
+        // DOT amount is normalised to Polkadot Planck units (1 DOT = 1e10 Planck)
+        // before the cross-VM call so the value fits in a u64.
+        // Rust receives packed u64: upper 32 bits = score, lower 32 bits = flag bitmask.
         uint8 riskScore;
         uint8 flagBitmask;
         try inferenceContract.scoreProposal(
             walletAgeBlocks,
-            uint64(info.requestedDOT),
+            uint64(info.requestedDot / 1e10),   // normalise: Planck → Planck-at-1e10
             history.approvedCount,
             history.totalProposals,
             daysSinceLast,
             info.trackId
-        ) returns (uint8 _score, uint8 _flags) {
-            riskScore = _score;
-            flagBitmask = _flags;
+        ) returns (uint64 packed) {
+            // Score lives in upper 32 bits (0–100), flags in lower 8 bits (0x1F max).
+            // Both values are provably within uint8 range by the Rust contract invariants.
+            // forge-lint: disable-next-line(unsafe-typecast)
+            riskScore    = uint8(packed >> 32);
+            // forge-lint: disable-next-line(unsafe-typecast)
+            flagBitmask  = uint8(packed & 0xFF);
         } catch {
             // Inference failed — store neutral score with failure flag.
             // This prevents a broken inference contract from blocking all scoring.
@@ -141,25 +158,36 @@ contract FenrirScorer is ReentrancyGuard, Ownable2Step {
             emit InferenceFailure(refIndex);
         }
 
+        // Asset Hub cross-check — verifies FLAG_LARGE_REQUEST independently.
+        // If the Asset Hub precompile confirms a native DOT request exceeding the threshold,
+        // we set the flag even if inference did not catch it (defense in depth).
+        try ASSET_HUB.getNativeAssetRequest(refIndex) returns (uint256 assetDot, bool hasRequest) {
+            if (hasRequest && assetDot > LARGE_REQUEST_THRESHOLD_PLANCK) {
+                flagBitmask |= FLAG_LARGE_REQUEST;
+            }
+        } catch { /* Asset Hub not available on this network — continue without it */ }
+
         // Persist the result
         scores[refIndex] = Score({
             value:        riskScore,
             flags:        flagBitmask,
             scoredAtBlock: uint64(block.number),
-            requestedDOT: uint128(info.requestedDOT),
+            requestedDot: uint128(info.requestedDot),
             exists:       true
         });
 
         scoredReferenda.push(refIndex);
         totalScored++;
-        if (riskScore >= THRESHOLD_HIGH) totalHighRiskFound++;
+        if (riskScore >= THRESHOLD_HIGH)         totalHighRiskFound++;
+        else if (riskScore >= THRESHOLD_MODERATE) totalModerate++;
+        else if (riskScore >= THRESHOLD_LOW)      totalLow++;
 
         emit ScorePublished(
             refIndex,
             info.proposer,
             riskScore,
             flagBitmask,
-            uint128(info.requestedDOT),
+            uint128(info.requestedDot),
             uint64(block.number)
         );
 
@@ -232,9 +260,8 @@ contract FenrirScorer is ReentrancyGuard, Ownable2Step {
     {
         total    = totalScored;
         highRisk = totalHighRiskFound;
-        // Moderate and low computed from events off-chain for gas efficiency
-        moderate = 0;
-        low      = 0;
+        moderate = totalModerate;
+        low      = totalLow;
     }
 
     // =========================================================================

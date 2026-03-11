@@ -12,11 +12,11 @@ import joblib
 
 FEATURE_COLS = [
     "wallet_age_blocks",
-    "requested_dot",
-    "dot_ratio_to_avg",       # engineered: requested / ecosystem_avg
+    "dot_requested",
+    "dot_ratio_to_avg",
     "prior_approved",
     "prior_total",
-    "approval_rate",           # engineered: prior_approved / prior_total
+    "approval_rate",
     "track_id",
     "days_since_last_prop",
 ]
@@ -24,8 +24,10 @@ FEATURE_COLS = [
 
 def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add engineered features required by the model."""
-    ecosystem_avg = df["requested_dot"].median()
-    df["dot_ratio_to_avg"] = df["requested_dot"] / max(ecosystem_avg, 1)
+    ecosystem_avg = df["dot_requested"].median()
+    # dot_ratio_to_avg and approval_rate already exist in CSV
+    # but recompute to ensure consistency
+    df["dot_ratio_to_avg"] = df["dot_requested"] / max(ecosystem_avg, 1)
     df["approval_rate"] = (
         df["prior_approved"] / df["prior_total"].clip(lower=1)
     ) * 100

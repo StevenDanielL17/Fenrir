@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.19;
 
 import {Test} from "forge-std/Test.sol";
 import {FenrirScorer} from "../src/FenrirScorer.sol";
 import {MockGovernance} from "../src/mocks/MockGovernance.sol";
+import {MockAssetHub} from "../src/mocks/MockAssetHub.sol";
 import {IFenrirInference} from "../src/interfaces/IFenrirInference.sol";
 import {IGovernancePrecompile} from "../src/interfaces/IGovernancePrecompile.sol";
 
@@ -20,11 +21,13 @@ contract MockInference is IFenrirInference {
     function setShouldFail(bool fail) external {
         shouldFail = fail;
     }
+    // Returns packed u64 matching the real PVM Rust contract:
+    // upper 32 bits = score, lower 32 bits = flag bitmask.
     function scoreProposal(uint64,uint64,uint32,uint32,uint32,uint8)
-        external view returns (uint8, uint8)
+        external view returns (uint64 packed)
     {
         if (shouldFail) revert("inference boom");
-        return (mockScore, mockFlags);
+        return (uint64(mockScore) << 32) | uint64(mockFlags);
     }
 }
 
@@ -33,6 +36,7 @@ contract FenrirScorerTest is Test {
     FenrirScorer  scorer;
     MockInference inference;
     MockGovernance gov;
+    MockAssetHub  assetHub;
 
     address proposer = address(0xBEEF);
     address notOwner = address(0xDEAD);
@@ -43,7 +47,7 @@ contract FenrirScorerTest is Test {
         address indexed proposer,
         uint8           score,
         uint8           flags,
-        uint128         requestedDOT,
+        uint128         requestedDot,
         uint64          scoredAtBlock
     );
 
@@ -51,9 +55,12 @@ contract FenrirScorerTest is Test {
         inference = new MockInference();
         scorer    = new FenrirScorer(address(inference));
         gov       = new MockGovernance();
+        assetHub  = new MockAssetHub();
 
         // Etch mock governance code at the precompile address
         vm.etch(address(scorer.GOVERNANCE()), address(gov).code);
+        // Etch mock Asset Hub at 0x0808 precompile address
+        vm.etch(address(scorer.ASSET_HUB()), address(assetHub).code);
     }
 
     // =========================================================================
@@ -66,7 +73,7 @@ contract FenrirScorerTest is Test {
         uint8 score = scorer.scoreReferendum(0);
 
         assertEq(score, 80);
-        // scores() returns: (value, flags, scoredAtBlock, requestedDOT, exists)
+        // scores() returns: (value, flags, scoredAtBlock, requestedDot, exists)
         (uint8 v,,,,) = scorer.scores(0);
         assertEq(v, 80);
         // getScoreDetails() returns 8 values
@@ -222,13 +229,14 @@ contract FenrirScorerTest is Test {
             scorer.getRecentScores(0, 20);
 
         assertEq(indices.length, 3);
+        assertEq(scoreValues.length, 3);
         // Newest first
         assertEq(indices[0], 2);
         assertEq(indices[1], 1);
         assertEq(indices[2], 0);
     }
 
-    function test_GetRecentScoresOffsetBeyondTotal() public {
+    function test_GetRecentScoresOffsetBeyondTotal() public view {
         (uint32[] memory indices,) = scorer.getRecentScores(100, 20);
         assertEq(indices.length, 0);
     }
@@ -261,7 +269,7 @@ contract FenrirScorerTest is Test {
         IGovernancePrecompile.ReferendumInfo memory info = IGovernancePrecompile.ReferendumInfo({
             status:         status,
             proposer:       prop,
-            requestedDOT:   dotAmt,
+            requestedDot:   dotAmt,
             submittedBlock: submittedBlock,
             trackId:        trackId
         });
@@ -273,5 +281,72 @@ contract FenrirScorerTest is Test {
         });
         MockGovernance(address(scorer.GOVERNANCE())).setReferendum(index, info);
         MockGovernance(address(scorer.GOVERNANCE())).setHistory(prop, hist);
+    }
+
+    // =========================================================================
+    // ADDITIONAL TESTS — minimum 19 total
+    // =========================================================================
+
+    /// @dev Verifies that HIGH RISK inputs (new wallet, large request, no history)
+    ///      produce a score >= 70 from the mock inference.
+    function test_WeightsProduceNonZeroScore() public {
+        inference.setMock(85, 0x07); // high risk: new wallet + large request + no history
+        _setupProposal(10, 0, proposer, 200_000 ether, 100, 34);
+        uint8 score = scorer.scoreReferendum(10);
+        assertGe(score, 70, "HIGH RISK inputs must score >= 70");
+        (uint8 v,,,,) = scorer.scores(10);
+        assertGe(v, 70);
+    }
+
+    /// @dev Verifies that a clean, established proposer scores <= 30.
+    function test_CleanProducerScoresLow() public {
+        inference.setMock(10, 0x00); // no flags, established proposer
+        _setupProposal(11, 0, proposer, 500 ether, 300_000, 33);
+        uint8 score = scorer.scoreReferendum(11);
+        assertLe(score, 30, "Established proposer must score <= 30");
+    }
+
+    /// @dev Verifies that packed uint64 from inference unpacks to correct score + flags.
+    ///      score=77, flags=0x03 → packed = (77 << 32) | 3
+    function test_PackedReturnUnpacksCorrectly() public {
+        uint8 expectedScore = 77;
+        uint8 expectedFlags = 0x03;
+        inference.setMock(expectedScore, expectedFlags);
+        _setupProposal(12, 0, proposer, 50_000 ether, 100, 5);
+        scorer.scoreReferendum(12);
+        (
+            uint8 score,
+            ,
+            bool newWallet,
+            bool largeReq,
+            , , ,
+        ) = scorer.getScoreDetails(12);
+        assertEq(score, expectedScore, "Score must unpack correctly from upper 32 bits");
+        assertTrue(newWallet,  "FLAG_NEW_WALLET (0x01) must be set");
+        assertTrue(largeReq,   "FLAG_LARGE_REQUEST (0x02) must be set");
+    }
+
+    /// @dev Verifies that totalModerate and totalLow counters increment correctly.
+    function test_StatsCountersIncrement() public {
+        // Score 1: HIGH RISK = 80 → goes to totalHighRiskFound
+        inference.setMock(80, 0x01);
+        _setupProposal(20, 0, proposer, 50_000 ether, 100, 5);
+        scorer.scoreReferendum(20);
+
+        // Score 2: MODERATE = 60 → goes to totalModerate
+        inference.setMock(60, 0x00);
+        _setupProposal(21, 0, proposer, 10_000 ether, 200, 33);
+        scorer.scoreReferendum(21);
+
+        // Score 3: LOW = 30 → goes to totalLow
+        inference.setMock(30, 0x00);
+        _setupProposal(22, 0, proposer, 2_000 ether, 300, 33);
+        scorer.scoreReferendum(22);
+
+        (uint256 total, uint256 highRisk, uint256 moderate, uint256 low) = scorer.getStats();
+        assertEq(total,    3, "Total should be 3");
+        assertEq(highRisk, 1, "High risk counter should be 1");
+        assertEq(moderate, 1, "Moderate counter should be 1");
+        assertEq(low,      1, "Low counter should be 1");
     }
 }

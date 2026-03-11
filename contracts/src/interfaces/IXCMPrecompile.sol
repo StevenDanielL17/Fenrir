@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.19;
 
 /// @title Polkadot Hub XCM Precompile Interface
 /// @dev Address: 0x0000000000000000000000000000000000000803
@@ -11,5 +11,5 @@ interface IXCMPrecompile {
     /// @notice Send an XCM message to another parachain.
     /// @param dest The destination parachain ID.
     /// @param message The XCM-encoded message bytes.
-    function sendXCM(uint32 dest, bytes calldata message) external;
+    function sendXcm(uint32 dest, bytes calldata message) external;
 }

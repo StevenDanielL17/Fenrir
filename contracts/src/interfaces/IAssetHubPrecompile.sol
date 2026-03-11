@@ -6,7 +6,7 @@
 // DOT amounts requested through the treasury mechanism.
 //
 // See BASE_INSTRUCTIONS.md Section 4.1 for the full specification.
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.19;
 
 /// @title IAssetHubPrecompile
 /// @notice Interface for the Polkadot Asset Hub precompile at address 0x0808.

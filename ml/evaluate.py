@@ -15,15 +15,15 @@ def evaluate(model_path: str = "model.joblib", data_path: str = "data/proposals.
     df = pd.read_csv(data_path)
 
     # Engineer features (same as train.py)
-    ecosystem_avg = df["requested_dot"].median()
-    df["dot_ratio_to_avg"] = df["requested_dot"] / max(ecosystem_avg, 1)
+    ecosystem_avg = df["dot_requested"].median()
+    df["dot_ratio_to_avg"] = df["dot_requested"] / max(ecosystem_avg, 1)
     df["approval_rate"] = (
         df["prior_approved"] / df["prior_total"].clip(lower=1)
     ) * 100
     df = df.fillna(0)
 
     feature_cols = [
-        "wallet_age_blocks", "requested_dot", "dot_ratio_to_avg",
+        "wallet_age_blocks", "dot_requested", "dot_ratio_to_avg",
         "prior_approved", "prior_total", "approval_rate",
         "track_id", "days_since_last_prop",
     ]

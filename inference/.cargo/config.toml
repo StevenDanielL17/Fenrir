@@ -1,5 +1,5 @@
 [build]
-target = "riscv32emac-unknown-none-polkavm"
+target = "riscv32imc-unknown-none-elf"
 
-[target.riscv32emac-unknown-none-polkavm]
+[target.riscv32imc-unknown-none-elf]
 rustflags = ["-C", "target-feature=+m"]

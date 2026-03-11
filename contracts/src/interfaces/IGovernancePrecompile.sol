@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.19;
 
 /// @title Polkadot Hub Governance Precompile Interface
 /// @dev Address: 0x0000000000000000000000000000000000000807
@@ -9,7 +9,7 @@ interface IGovernancePrecompile {
     struct ReferendumInfo {
         uint8   status;           // 0=ongoing, 1=approved, 2=rejected, 3=cancelled
         address proposer;
-        uint256 requestedDOT;     // in Planck (1e18)
+        uint256 requestedDot;     // in Planck (1e18)
         uint256 submittedBlock;
         uint8   trackId;
     }

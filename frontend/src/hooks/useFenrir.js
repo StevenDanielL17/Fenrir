@@ -6,20 +6,16 @@
 // on page load.
 // ======================================================================
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { enrichWithDeadlines } from "./useProposalMeta";
 import { ethers } from "ethers";
 import { CONTRACTS, RPC_URL } from "../constants/contracts";
 
-// Demo proposals used when VITE_SCORER_ADDRESS is not set
+// Demo proposals — only 2 entries. One HIGH RISK (urgent), one MINIMAL RISK.
+// Kept minimal so the UI state is clean and testable without noise.
 const DEMO_PROPOSALS = [
-  { refIndex: 847, score: 82, verdict: "HIGH RISK", requestedDOT: "42000", flags: { newWallet: true, largeRequest: true, noHistory: false, lowApproval: false, burst: false } },
-  { refIndex: 845, score: 36, verdict: "LOW RISK", requestedDOT: "8500", flags: { newWallet: false, largeRequest: false, noHistory: true, lowApproval: false, burst: false } },
-  { refIndex: 839, score: 91, verdict: "HIGH RISK", requestedDOT: "120000", flags: { newWallet: true, largeRequest: true, noHistory: true, lowApproval: false, burst: true } },
-  { refIndex: 834, score: 15, verdict: "MINIMAL RISK", requestedDOT: "3200", flags: { newWallet: false, largeRequest: false, noHistory: false, lowApproval: false, burst: false } },
-  { refIndex: 830, score: 58, verdict: "MODERATE RISK", requestedDOT: "27800", flags: { newWallet: false, largeRequest: true, noHistory: false, lowApproval: true, burst: false } },
-  { refIndex: 826, score: 22, verdict: "MINIMAL RISK", requestedDOT: "4100", flags: { newWallet: false, largeRequest: false, noHistory: false, lowApproval: false, burst: false } },
-  { refIndex: 821, score: 71, verdict: "MODERATE RISK", requestedDOT: "35600", flags: { newWallet: true, largeRequest: true, noHistory: false, lowApproval: false, burst: false } },
-  { refIndex: 818, score: 44, verdict: "LOW RISK", requestedDOT: "12400", flags: { newWallet: false, largeRequest: false, noHistory: true, lowApproval: true, burst: false } },
+  { refIndex: 839, score: 91, verdict: "HIGH RISK",    requestedDOT: "120000", title: "Marketing: Global Campaign — Cycle 3",      hoursRemaining: 6,   isClosingSoon: true,  flags: { newWallet: true,  largeRequest: true,  noHistory: true,  lowApproval: false, burst: true  } },
+  { refIndex: 834, score: 15, verdict: "MINIMAL RISK", requestedDOT: "3200",   title: "Core Fellowship: Runtime Dev Retainer Q1", hoursRemaining: 168, isClosingSoon: false, flags: { newWallet: false, largeRequest: false, noHistory: false, lowApproval: false, burst: false } },
 ];
 
 export function useFenrir() {
@@ -47,6 +43,10 @@ export function useFenrir() {
   const [filter, setFilter]     = useState("all");
   const [search, setSearch]     = useState("");
 
+  // Persistent Set of ref indices that have been scored in this session.
+  // useRef avoids stale closure problems — always current regardless of render.
+  const scoredRefsRef = useRef(new Set(DEMO_PROPOSALS.map(p => p.refIndex)));
+
   // -----------------------------------------------------------------------
   // Data Loading
   // -----------------------------------------------------------------------
@@ -72,7 +72,7 @@ export function useFenrir() {
     }
     try {
       const { indices, scoreValues } = await contract.getRecentScores(0, 20);
-      const enriched = await Promise.all(
+      const base = await Promise.all(
         indices.map(async (idx, i) => {
           const details = await contract.getScoreDetails(idx);
           const raw = await contract.scores(idx);
@@ -91,6 +91,8 @@ export function useFenrir() {
           };
         })
       );
+      // Enrich with Polkassembly deadline + title data (best-effort, never blocks)
+      const enriched = await enrichWithDeadlines(base).catch(() => base);
       setScores(enriched);
     } catch (e) {
       console.error("Scores load failed:", e);
@@ -117,11 +119,15 @@ export function useFenrir() {
 
   const scoreProposal = useCallback(async (refIndex) => {
     if (isDemoMode) {
-      // Simulate scoring
+      // Guard: use the ref-based Set — never stale, never affected by filters
+      if (scoredRefsRef.current.has(refIndex)) return { alreadyScored: true };
+
       const fakeScore = Math.floor(Math.random() * 80) + 10;
       const fakeFlags = { newWallet: fakeScore > 60, largeRequest: fakeScore > 70, noHistory: false, lowApproval: false, burst: false };
       const verdict = fakeScore >= 75 ? "HIGH RISK" : fakeScore >= 50 ? "MODERATE RISK" : fakeScore >= 25 ? "LOW RISK" : "MINIMAL RISK";
-      const newProposal = { refIndex, score: fakeScore, verdict, requestedDOT: "10000", flags: fakeFlags };
+      const newProposal = { refIndex, score: fakeScore, verdict, requestedDOT: "10000", title: `Referendum #${refIndex}`, hoursRemaining: null, isClosingSoon: false, flags: fakeFlags };
+
+      scoredRefsRef.current.add(refIndex); // register before setState to prevent race
       setScores(prev => [newProposal, ...prev]);
       setStats(prev => ({
         total: prev.total + 1,
@@ -184,6 +190,9 @@ export function useFenrir() {
     setSearch,
     setSelected,
     scoreProposal,
+    // Returns true immediately if refIndex is already in the scored set.
+    // Used by App.jsx to give live feedback while the user is typing.
+    isScored: (refIndex) => scoredRefsRef.current.has(refIndex),
     loadRecentScores,
     clearError: () => setError(null),
     retry: () => {

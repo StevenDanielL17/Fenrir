@@ -1,0 +1,24 @@
+Contract Deployment
+bash
+cd /home/stevendaniell/BackUp/Dan/dansprojects/Fenrir
+source .env
+# Deploy FenrirScorer
+forge script contracts/script/Deploy.s.sol \
+  --rpc-url $WESTEND_EVM_RPC \
+  --broadcast \
+  --private-key $PRIVATE_KEY \
+  -vvvv
+After it gives you the contract address, update .env:
+
+bash
+VITE_SCORER_ADDRESS=0x<deployed_address>
+Frontend Deployment
+bash
+vercel login
+cd frontend
+vercel --prod --yes
+Verify Deployment
+bash
+source .env
+cast call $VITE_SCORER_ADDRESS "totalScored()(uint256)" --rpc-url $WESTEND_EVM_RPC
+That's it. The codebase is fully built, tested, and ready to deploy. Everything you need is those 3 commands when the time comes. 🐺

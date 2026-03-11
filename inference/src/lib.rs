@@ -1,6 +1,10 @@
-#![no_std]
-#![no_main]
-
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_main)]
+#[cfg(not(test))]
+#[panic_handler]
+fn panic(_info: &core::panic::PanicInfo) -> ! {
+    loop {}
+}
 mod weights;
 use weights::*;
 
@@ -15,7 +19,7 @@ use weights::*;
 /// 0x08 = low approval rate (< MIN_APPROVAL_RATE %)
 /// 0x10 = burst submission (multiple proposals within 3 days)
 
-#[polkavm_derive::polkavm_export]
+#[cfg_attr(not(test), polkavm_derive::polkavm_export)]
 pub extern "C" fn score_proposal(
     wallet_age_blocks: u64,
     requested_dot_raw: u64,      // in Planck (1e18)
@@ -110,12 +114,12 @@ mod tests {
     #[test]
     fn test_high_risk_new_wallet_large_request() {
         let packed = score_proposal(
-            5_000,               // very new wallet
-            25_000_000_000_000_000_000_000,  // 25000 DOT = 5x average
-            0,                   // no approvals
-            0,                   // no history
-            999,                 // no burst
-            34,                  // big_spender track
+            5_000,                               // very new wallet
+            500_000_000_000_000,                 // 50000 DOT at 1e10 Planck = 5x ecosystem average
+            0,                                   // no approvals
+            0,                                   // no history
+            999,                                 // no burst
+            34,                                  // big_spender track
         );
         let (score, flags) = unpack(packed);
         assert!(score >= 50, "Expected high risk, got {}", score);
@@ -127,12 +131,12 @@ mod tests {
     #[test]
     fn test_low_risk_established_proposer() {
         let packed = score_proposal(
-            200_000,             // old wallet
-            1_000_000_000_000_000_000_000,  // 1000 DOT = well below average
-            8,                   // 8 approved
-            10,                  // 10 total = 80%
-            30,                  // no burst
-            33,                  // medium_spender
+            200_000,                             // old wallet
+            10_000_000_000_000,                  // 1000 DOT at 1e10 — below average
+            8,                                   // 8 approved
+            10,                                  // 10 total = 80%
+            30,                                  // no burst
+            33,                                  // medium_spender
         );
         let (score, flags) = unpack(packed);
         assert!(score <= 30, "Expected low risk, got {}", score);
@@ -143,10 +147,10 @@ mod tests {
     fn test_burst_detection() {
         let packed = score_proposal(
             200_000,
-            1_000_000_000_000_000_000_000,
+            10_000_000_000_000,              // 1000 DOT at 1e10
             5,
             8,
-            1,                   // 1 day since last = burst
+            1,                               // 1 day since last = burst
             33,
         );
         let (_, flags) = unpack(packed);
@@ -156,8 +160,8 @@ mod tests {
     #[test]
     fn test_score_capped_at_100() {
         let packed = score_proposal(
-            0,                   // brand new wallet
-            100_000_000_000_000_000_000_000, // absurdly large
+            0,                               // brand new wallet
+            1_000_000_000_000_000_000,       // absurdly large (1e8 DOT at 1e10)
             0, 0, 0, 34,
         );
         let (score, _) = unpack(packed);
@@ -173,8 +177,8 @@ mod tests {
 
     #[test]
     fn test_deterministic() {
-        let a = score_proposal(10_000, 5_000_000_000_000_000_000_000, 2, 5, 10, 33);
-        let b = score_proposal(10_000, 5_000_000_000_000_000_000_000, 2, 5, 10, 33);
+        let a = score_proposal(10_000, 50_000_000_000_000, 2, 5, 10, 33); // 5000 DOT
+        let b = score_proposal(10_000, 50_000_000_000_000, 2, 5, 10, 33);
         assert_eq!(a, b, "Same inputs must produce same output");
     }
 }

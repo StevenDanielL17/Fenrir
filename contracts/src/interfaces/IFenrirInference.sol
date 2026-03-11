@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-pragma solidity ^0.8.20;
+pragma solidity ^0.8.19;
 
 /// @title Fenrir PVM Inference Contract Interface
 /// @dev Cross-VM call: Solidity (EVM) → Rust (PolkaVM).
@@ -12,8 +12,8 @@ interface IFenrirInference {
     /// @param priorTotal         Total proposals submitted by this address
     /// @param daysSinceLastProp  Days since last submission (for burst detection)
     /// @param trackId            OpenGov track ID (0=root, 13=treasurer, etc.)
-    /// @return score             Risk score 0–100
-    /// @return flagBitmask       Which risk features triggered (see FLAG_* constants)
+    /// @return packed  Upper 32 bits = risk score (0–100), lower 32 bits = flag bitmask.
+    ///                 Unpack in Solidity: score = uint8(packed >> 32); flags = uint8(packed & 0xFF);
     function scoreProposal(
         uint64 walletAgeBlocks,
         uint64 requestedDotRaw,
@@ -21,5 +21,5 @@ interface IFenrirInference {
         uint32 priorTotal,
         uint32 daysSinceLastProp,
         uint8  trackId
-    ) external view returns (uint8 score, uint8 flagBitmask);
+    ) external view returns (uint64 packed);
 }
