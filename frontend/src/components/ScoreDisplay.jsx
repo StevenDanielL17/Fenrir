@@ -15,23 +15,23 @@ function riskColor(score) {
 export default function ScoreDisplay({ score, verdict }) {
   const numRef = useRef();
   const barRef = useRef();
+  const counterObj = useRef({ v: 0 });
   const rc = riskColor(score);
   const circumference = 2 * Math.PI * 90;
 
   useEffect(() => {
-    // Count-up animation
-    gsap.fromTo(
-      { v: 0 },
-      {
-        v: score,
-        duration: 1.2,
-        ease: "power3.out",
-        onUpdate: function () {
-          if (numRef.current)
-            numRef.current.textContent = Math.round(this.targets()[0].v);
-        },
+    if (!numRef.current || !barRef.current) return;
+    counterObj.current.v = 0;
+
+    gsap.to(counterObj.current, {
+      v: score,
+      duration: 1.2,
+      ease: "power3.out",
+      onUpdate: () => {
+        if (numRef.current)
+          numRef.current.textContent = Math.round(counterObj.current.v);
       },
-    );
+    });
 
     // SVG ring fill animation
     gsap.fromTo(

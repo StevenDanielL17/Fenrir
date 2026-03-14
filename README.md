@@ -260,12 +260,16 @@ VITE_CHAIN_ID=420420421
 
 ## Deployment
 
-### Contract Addresses (Westend Testnet)
+### Live Demo
 
-| Contract        | Network | Address |
-| --------------- | ------- | ------- |
-| FenrirScorer    | Westend | `TBD`   |
-| FenrirInference | Westend | `TBD`   |
+**[https://frontend-nine-khaki-64.vercel.app](https://frontend-nine-khaki-64.vercel.app)**
+
+### Contract Addresses (Polkadot Asset Hub Westend — Chain 420420417)
+
+| Contract        | Network             | Address                                      |
+| --------------- | ------------------- | -------------------------------------------- |
+| FenrirScorer    | Westend (420420417) | `0xC85154584f2A491d65A3B034c9BbBe87c7753e3e` |
+| FenrirInference | Westend (420420417) | `0xc60FfD7b415e00def0153dc420447cFdE1FAa8B3` |
 
 ### Deploy Commands
 
@@ -274,12 +278,16 @@ VITE_CHAIN_ID=420420421
 cp .env.example .env
 # Edit .env with your PRIVATE_KEY and INFERENCE_CONTRACT address
 
-# Deploy FenrirScorer
+# Deploy both contracts
 forge script contracts/script/Deploy.s.sol \
   --rpc-url $WESTEND_EVM_RPC \
   --broadcast \
   --private-key $PRIVATE_KEY \
+  --slow --legacy \
   -vvvv
+
+# Deploy frontend
+cd frontend && npm run build && vercel --prod --yes
 ```
 
 ---
@@ -339,12 +347,19 @@ fenrir/
 │   │   │   ├── ScoreDisplay.jsx
 │   │   │   ├── FlagBreakdown.jsx
 │   │   │   ├── StatsBanner.jsx
-│   │   │   └── SkeletonCard.jsx
+│   │   │   ├── SkeletonCard.jsx
+│   │   │   ├── Hero.jsx
+│   │   │   ├── Preloader.jsx
+│   │   │   └── UrgentAlert.jsx
 │   │   ├── hooks/
 │   │   │   └── useFenrir.js
 │   │   ├── App.jsx
 │   │   ├── main.jsx
 │   │   └── index.css
+│   └── package.json
+│
+├── backend/                           # Auto-scorer service (Railway)
+│   ├── autoScorer.ts                 # Watches chain, auto-scores new proposals
 │   └── package.json
 │
 ├── .env.example

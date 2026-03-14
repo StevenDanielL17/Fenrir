@@ -80,11 +80,11 @@ export default function App() {
   if (selected) {
     return (
       <div>
-        <Nav view={view} setView={setView} isDemoMode={isDemoMode} />
+        <Nav view={view} setView={setView} setSelected={setSelected} isDemoMode={isDemoMode} />
         <StatsBanner stats={stats} dotProtected={dotProtected} />
         <div className="main" style={{ gridTemplateColumns: "1fr" }}>
           <div className="detail-view">
-            <button className="back-btn" onClick={() => setSelected(null)}>
+            <button className="back-btn" onClick={() => { setSelected(null); setView("feed"); }}>
               ← Back to proposals
             </button>
             <div className="detail-ref">REF #{selected.refIndex}</div>
@@ -163,7 +163,7 @@ export default function App() {
 
     return (
       <div>
-        <Nav view={view} setView={setView} isDemoMode={isDemoMode} />
+        <Nav view={view} setView={setView} setSelected={setSelected} isDemoMode={isDemoMode} />
         <StatsBanner stats={stats} dotProtected={dotProtected} />
         <div className="main" style={{ gridTemplateColumns: "1fr", maxWidth: 900 }}>
           {/* Narrative paragraph */}
@@ -228,7 +228,7 @@ export default function App() {
   // -----------------------------------------------------------------------
   return (
     <div>
-      <Nav view={view} setView={setView} isDemoMode={isDemoMode} />
+      <Nav view={view} setView={setView} setSelected={setSelected} isDemoMode={isDemoMode} />
 
       {/* Cinematic hero — full viewport, GSAP stagger */}
       <Hero stats={stats} dotProtected={dotProtected} />
@@ -406,30 +406,28 @@ export default function App() {
 // -----------------------------------------------------------------------
 // Nav — fixed top bar
 // -----------------------------------------------------------------------
-function Nav({ view, setView, isDemoMode }) {
+function Nav({ view, setView, setSelected, isDemoMode }) {
   return (
     <nav className="nav">
-      <div className="nav-brand" onClick={() => setView("feed")} style={{ gap: 12 }}>
+      <div className="nav-brand" onClick={() => { setSelected(null); setView("feed"); }} style={{ gap: 12 }}>
         <img src={fenrirLogo} alt="Fenrir" style={{ width: 44, height: 44, borderRadius: "50%", filter: "drop-shadow(0 0 10px rgba(14, 165, 233, 0.5))" }} />
         <span style={{ fontSize: 18, color: "var(--text-primary)" }}>fenrir</span>
       </div>
       <div className="nav-links">
         <button
-          className={`nav-btn ${view === "feed" ? "active" : ""}`}
-          onClick={() => setView("feed")}
+          className={`nav-btn ${view === "feed" && !false ? "active" : ""}`}
+          onClick={() => { setSelected(null); setView("feed"); }}
         >
           Proposals
         </button>
         <button
           className={`nav-btn ${view === "stats" ? "active" : ""}`}
-          onClick={() => setView("stats")}
+          onClick={() => { setSelected(null); setView("stats"); }}
         >
           Stats
         </button>
       </div>
-      {isDemoMode && (
-        <span className="nav-badge">DEMO MODE</span>
-      )}
+      {isDemoMode && <span className="nav-badge">DEMO MODE</span>}
     </nav>
   );
 }
