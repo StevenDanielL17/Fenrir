@@ -30,6 +30,9 @@ export default function App() {
   const [scoring, setScoring] = useState(false);
   const [scoreDone, setScoredDone] = useState(false);
   const [scoreError, setScoreError] = useState("");
+  const [walletAddress, setWalletAddress] = useState("");
+  const [connectingWallet, setConnectingWallet] = useState(false);
+  const [walletError, setWalletError] = useState("");
 
   // Listen for the urgent-alert "Review now" click to open detail view
   useEffect(() => {
@@ -37,6 +40,47 @@ export default function App() {
     window.addEventListener("fenrir:select-proposal", handler);
     return () => window.removeEventListener("fenrir:select-proposal", handler);
   }, [setSelected]);
+
+  useEffect(() => {
+    if (!window.ethereum) return;
+
+    const handleAccountsChanged = (accounts) => {
+      setWalletAddress(accounts?.[0] || "");
+    };
+
+    window.ethereum
+      .request({ method: "eth_accounts" })
+      .then(handleAccountsChanged)
+      .catch(() => {});
+
+    window.ethereum.on?.("accountsChanged", handleAccountsChanged);
+    return () => window.ethereum.removeListener?.("accountsChanged", handleAccountsChanged);
+  }, []);
+
+  const connectWallet = async () => {
+    if (!window.ethereum) {
+      setWalletError("No wallet found. Install MetaMask.");
+      setTimeout(() => setWalletError(""), 4000);
+      return;
+    }
+
+    setConnectingWallet(true);
+    setWalletError("");
+
+    try {
+      const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
+      if (!accounts?.length) throw new Error("No account returned by wallet");
+      setWalletAddress(accounts[0]);
+    } catch (e) {
+      const message = e?.code === 4001
+        ? "Wallet connection was rejected."
+        : (e?.message || "Wallet connection failed");
+      setWalletError(message);
+      setTimeout(() => setWalletError(""), 4000);
+    } finally {
+      setConnectingWallet(false);
+    }
+  };
 
   // Handle scoring
   const handleScore = async (refIndex) => {
@@ -99,7 +143,15 @@ export default function App() {
   if (selected) {
     return (
       <div>
-        <Nav view={view} setView={setView} setSelected={setSelected} isDemoMode={isDemoMode} />
+        <Nav
+          view={view}
+          setView={setView}
+          setSelected={setSelected}
+          isDemoMode={isDemoMode}
+          walletAddress={walletAddress}
+          connectingWallet={connectingWallet}
+          onConnectWallet={connectWallet}
+        />
         <StatsBanner stats={stats} dotProtected={dotProtected} />
         <div className="main" style={{ gridTemplateColumns: "1fr" }}>
           <div className="detail-view">
@@ -192,7 +244,15 @@ export default function App() {
 
     return (
       <div>
-        <Nav view={view} setView={setView} setSelected={setSelected} isDemoMode={isDemoMode} />
+        <Nav
+          view={view}
+          setView={setView}
+          setSelected={setSelected}
+          isDemoMode={isDemoMode}
+          walletAddress={walletAddress}
+          connectingWallet={connectingWallet}
+          onConnectWallet={connectWallet}
+        />
         <StatsBanner stats={stats} dotProtected={dotProtected} />
         <div className="main" style={{ gridTemplateColumns: "1fr", maxWidth: 900 }}>
           {/* Narrative paragraph */}
@@ -331,7 +391,33 @@ export default function App() {
   // -----------------------------------------------------------------------
   return (
     <div>
-      <Nav view={view} setView={setView} setSelected={setSelected} isDemoMode={isDemoMode} />
+      <Nav
+        view={view}
+        setView={setView}
+        setSelected={setSelected}
+        isDemoMode={isDemoMode}
+        walletAddress={walletAddress}
+        connectingWallet={connectingWallet}
+        onConnectWallet={connectWallet}
+      />
+
+      {walletError && (
+        <div style={{
+          position: "fixed",
+          top: 64,
+          right: 16,
+          zIndex: 1000,
+          background: "var(--bg-surface)",
+          border: "1px solid var(--risk-high)",
+          color: "var(--risk-high)",
+          padding: "8px 10px",
+          borderRadius: 8,
+          fontFamily: "var(--font-mono)",
+          fontSize: 11,
+        }}>
+          {walletError}
+        </div>
+      )}
 
       {/* Cinematic hero — full viewport, GSAP stagger */}
       <Hero stats={stats} dotProtected={dotProtected} />
@@ -509,7 +595,11 @@ export default function App() {
 // -----------------------------------------------------------------------
 // Nav — fixed top bar
 // -----------------------------------------------------------------------
-function Nav({ view, setView, setSelected, isDemoMode }) {
+function Nav({ view, setView, setSelected, isDemoMode, walletAddress, connectingWallet, onConnectWallet }) {
+  const walletLabel = walletAddress
+    ? `${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`
+    : (connectingWallet ? "Connecting..." : "Connect Wallet");
+
   return (
     <nav className="nav">
       <div className="nav-brand" onClick={() => { setSelected(null); setView("feed"); }} style={{ gap: 12 }}>
@@ -532,7 +622,15 @@ function Nav({ view, setView, setSelected, isDemoMode }) {
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         {isDemoMode && <span className="nav-badge">DEMO MODE</span>}
-        <button className="connect-btn" type="button">Connect Wallet</button>
+        <button
+          className="connect-btn"
+          type="button"
+          onClick={onConnectWallet}
+          disabled={connectingWallet}
+          title={walletAddress || "Connect EVM wallet"}
+        >
+          {walletLabel}
+        </button>
       </div>
     </nav>
   );
