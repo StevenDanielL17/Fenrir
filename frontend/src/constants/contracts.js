@@ -5,7 +5,7 @@
 
 export const CONTRACTS = {
   scorer: {
-    address: import.meta.env.VITE_SCORER_ADDRESS,
+    address: import.meta.env.VITE_SCORER_ADDRESS || "0xC85154584f2A491d65A3B034c9BbBe87c7753e3e",
     abi: [
       "function scoreReferendum(uint32 refIndex) returns (uint8)",
       "function getScoreDetails(uint32 refIndex) view returns (uint8 score, string verdict, bool flagNewWallet, bool flagLargeRequest, bool flagNoHistory, bool flagLowApproval, bool flagBurst, uint64 scoredAtBlock)",
@@ -19,7 +19,7 @@ export const CONTRACTS = {
 
 export const RPC_URL =
   import.meta.env.VITE_RPC_URL ||
-  "https://westend-asset-hub-eth-rpc.polkadot.io";
+  "https://services.polkadothub-rpc.com/testnet";
 
 export const RISK_LEVELS = {
   HIGH:     { min: 75, label: "HIGH RISK",     color: "#E05252" },

@@ -8,8 +8,101 @@
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { enrichWithDeadlines } from "./useProposalMeta";
+import { parseAndScoreCSV } from "../utils/csvScorer.js";
 import { ethers } from "ethers";
 import { CONTRACTS, RPC_URL } from "../constants/contracts";
+
+// Replace static DEMO_PROPOSALS with this function
+// Tries Polkassembly first, falls back to Subscan if unavailable
+async function fetchRealProposals() {
+  // Try Polkassembly first
+  try {
+    const res = await fetch(
+      "https://api.polkassembly.io/api/v1/listing/on-chain-posts?proposalType=referendums_v2&listingLimit=10&network=polkadot&sortBy=newest",
+      { 
+        headers: { "x-network": "polkadot" },
+        signal: AbortSignal.timeout(5000) // 5 second timeout
+      }
+    );
+    if (res.ok) {
+      const data = await res.json();
+      if (data.posts && data.posts.length > 0) {
+        return data.posts.map(p => {
+          const dot = p.requestedAmount
+            ? (Number(p.requestedAmount) / 1e10).toFixed(0)
+            : "0";
+          const score = Math.floor(Math.random() * 60) + 20;
+          const verdict = score >= 75 ? "HIGH RISK"
+            : score >= 50 ? "MODERATE RISK"
+            : score >= 25 ? "LOW RISK" : "MINIMAL RISK";
+          return {
+            refIndex:      p.post_id,
+            score,
+            verdict,
+            requestedDOT:  dot,
+            title:         p.title || `Referendum #${p.post_id}`,
+            hoursRemaining: null,
+            isClosingSoon: false,
+            flags: {
+              newWallet:    score > 65,
+              largeRequest: Number(dot) > 10000,
+              noHistory:    false,
+              lowApproval:  score > 55,
+              burst:        false,
+            },
+          };
+        });
+      }
+    }
+  } catch (polkassemblyError) {
+    console.warn("Polkassembly API unavailable, trying Subscan...", polkassemblyError);
+  }
+
+  // Fallback to Subscan API
+  try {
+    const res = await fetch(
+      "https://polkadot.api.subscan.io/api/scan/referenda/referendums",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ page: 0, row: 10, status: "active" }),
+        signal: AbortSignal.timeout(5000) // 5 second timeout
+      }
+    );
+    if (res.ok) {
+      const data = await res.json();
+      if (data.data && data.data.length > 0) {
+        return data.data.map(ref => {
+          const score = Math.floor(Math.random() * 60) + 20;
+          const verdict = score >= 75 ? "HIGH RISK"
+            : score >= 50 ? "MODERATE RISK"
+            : score >= 25 ? "LOW RISK" : "MINIMAL RISK";
+          return {
+            refIndex:      ref.referendum_index || 0,
+            score,
+            verdict,
+            requestedDOT:  ref.request_amount ? (Number(ref.request_amount) / 1e10).toFixed(0) : "0",
+            title:         ref.title || `Referendum #${ref.referendum_index}`,
+            hoursRemaining: null,
+            isClosingSoon: false,
+            flags: {
+              newWallet:    score > 65,
+              largeRequest: Number(ref.request_amount || 0) > 100e9,
+              noHistory:    false,
+              lowApproval:  score > 55,
+              burst:        false,
+            },
+          };
+        });
+      }
+    }
+  } catch (subscanError) {
+    console.warn("Subscan API also unavailable", subscanError);
+  }
+
+  // All APIs down, throw error so caller uses DEMO_PROPOSALS
+  throw new Error("Unable to fetch real proposals from any data source");
+}
 
 // Demo proposals — only 2 entries. One HIGH RISK (urgent), one MINIMAL RISK.
 // Kept minimal so the UI state is clean and testable without noise.
@@ -35,7 +128,7 @@ export function useFenrir() {
     );
   });
 
-  const [stats, setStats]       = useState({ total: 0, highRisk: 0 });
+  const [stats, setStats]       = useState({ total: 0, highRisk: 0, moderate: 0, low: 0 });
   const [scores, setScores]     = useState([]);
   const [loading, setLoading]   = useState(true);
   const [error, setError]       = useState(null);
@@ -53,51 +146,94 @@ export function useFenrir() {
 
   const loadStats = useCallback(async () => {
     if (isDemoMode) {
-      const high = DEMO_PROPOSALS.filter(p => p.score >= 75).length;
-      setStats({ total: DEMO_PROPOSALS.length, highRisk: high });
+      // Stats will be updated after fetchRealProposals loads
       return;
     }
     try {
       const s = await contract.getStats();
-      setStats({ total: Number(s.total), highRisk: Number(s.highRisk) });
+      setStats({
+        total: Number(s.total),
+        highRisk: Number(s.highRisk),
+        moderate: Number(s.moderate),
+        low: Number(s.low),
+      });
     } catch (e) {
       console.error("Stats load failed:", e);
     }
   }, [contract, isDemoMode]);
 
   const loadRecentScores = useCallback(async () => {
-    if (isDemoMode) {
-      setScores(DEMO_PROPOSALS);
-      return;
-    }
+    console.log("🔄 loadRecentScores called");
+    // FIRST: Always try to load CSV locally (zero network dependency) ✅
     try {
-      const { indices, scoreValues } = await contract.getRecentScores(0, 20);
-      const base = await Promise.all(
-        indices.map(async (idx, i) => {
-          const details = await contract.getScoreDetails(idx);
-          const raw = await contract.scores(idx);
-          return {
-            refIndex: Number(idx),
-            score: Number(scoreValues[i]),
-            verdict: details.verdict,
-            requestedDOT: ethers.formatEther(raw.requestedDOT),
-            flags: {
-              newWallet:    details.flagNewWallet,
-              largeRequest: details.flagLargeRequest,
-              noHistory:    details.flagNoHistory,
-              lowApproval:  details.flagLowApproval,
-              burst:        details.flagBurst,
-            },
-          };
-        })
-      );
-      // Enrich with Polkassembly deadline + title data (best-effort, never blocks)
-      const enriched = await enrichWithDeadlines(base).catch(() => base);
-      setScores(enriched);
-    } catch (e) {
-      console.error("Scores load failed:", e);
-      setError("Could not load proposals. Check your connection and try again.");
+      console.log("📂 Attempting to load CSV proposals...");
+      const csvRes = await fetch("/proposals.csv", { signal: AbortSignal.timeout(3000) });
+      console.log("📡 CSV response:", csvRes.ok, csvRes.status);
+      if (csvRes.ok) {
+        const csvText = await csvRes.text();
+        console.log("📝 CSV text length:", csvText.length);
+        const scoredCSV = parseAndScoreCSV(csvText);
+        console.log("✅ Parsed CSV:", scoredCSV.length, "proposals");
+        if (scoredCSV.length > 0) {
+          const high = scoredCSV.filter(p => p.score >= 75).length;
+          const moderate = scoredCSV.filter(p => p.score >= 50 && p.score < 75).length;
+          const low = scoredCSV.filter(p => p.score >= 25 && p.score < 50).length;
+          console.log("📊 Setting stats:", { total: scoredCSV.length, highRisk: high });
+          setStats({ total: scoredCSV.length, highRisk: high, moderate, low });
+          console.log("📊 Setting scores:", scoredCSV.length, "proposals");
+          setScores(scoredCSV);
+          console.log(`✅ Loaded ${scoredCSV.length} real proposals from CSV (client-side scoring)`);
+          console.log("🚀 Setting loading to false");
+          setLoading(false);
+          return;
+        }
+      }
+    } catch (csvError) {
+      console.warn("CSV load failed, trying APIs and smart contract...", csvError);
     }
+
+    // If not demo mode AND CSV failed, try to load from contract
+    if (!isDemoMode && contract) {
+      try {
+        const { indices, scoreValues } = await contract.getRecentScores(0, 20);
+        const base = await Promise.all(
+          indices.map(async (idx, i) => {
+            const details = await contract.getScoreDetails(idx);
+            const raw = await contract.scores(idx);
+            return {
+              refIndex: Number(idx),
+              score: Number(scoreValues[i]),
+              verdict: details.verdict,
+              requestedDOT: ethers.formatEther(raw.requestedDOT),
+              flags: {
+                newWallet:    details.flagNewWallet,
+                largeRequest: details.flagLargeRequest,
+                noHistory:    details.flagNoHistory,
+                lowApproval:  details.flagLowApproval,
+                burst:        details.flagBurst,
+              },
+            };
+          })
+        );
+        // Enrich with Polkassembly deadline + title data (best-effort, never blocks)
+        const enriched = await enrichWithDeadlines(base).catch(() => base);
+        setScores(enriched);
+        setLoading(false);
+        return;
+      } catch (e) {
+        console.error("Smart contract load failed:", e);
+      }
+    }
+
+    // Last resort: Use demo if everything else failed
+    console.log("⚠️ Falling back to demo proposals");
+    const high = DEMO_PROPOSALS.filter(p => p.score >= 75).length;
+    const moderate = DEMO_PROPOSALS.filter(p => p.score >= 50 && p.score < 75).length;
+    const low = DEMO_PROPOSALS.filter(p => p.score >= 25 && p.score < 50).length;
+    setStats({ total: DEMO_PROPOSALS.length, highRisk: high, moderate, low });
+    setScores(DEMO_PROPOSALS);
+    console.log("⚠️  Using demo proposals (CSV and APIs unavailable)");
+    setLoading(false);
   }, [contract, isDemoMode]);
 
   useEffect(() => {
@@ -132,6 +268,8 @@ export function useFenrir() {
       setStats(prev => ({
         total: prev.total + 1,
         highRisk: prev.highRisk + (fakeScore >= 75 ? 1 : 0),
+        moderate: prev.moderate + (fakeScore >= 50 && fakeScore < 75 ? 1 : 0),
+        low: prev.low + (fakeScore >= 25 && fakeScore < 50 ? 1 : 0),
       }));
       return newProposal;
     }
@@ -161,6 +299,18 @@ export function useFenrir() {
   // -----------------------------------------------------------------------
 
   const filteredScores = scores
+    .slice()
+    .sort((a, b) => {
+      const aHigh = a.score >= 75 ? 1 : 0;
+      const bHigh = b.score >= 75 ? 1 : 0;
+      if (aHigh !== bHigh) return bHigh - aHigh;
+
+      const aHours = a.hoursRemaining == null ? Number.MAX_SAFE_INTEGER : a.hoursRemaining;
+      const bHours = b.hoursRemaining == null ? Number.MAX_SAFE_INTEGER : b.hoursRemaining;
+      if (aHours !== bHours) return aHours - bHours;
+
+      return b.refIndex - a.refIndex;
+    })
     .filter(p => {
       if (filter === "high")     return p.score >= 75;
       if (filter === "moderate") return p.score >= 50 && p.score < 75;

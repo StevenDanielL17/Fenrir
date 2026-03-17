@@ -13,6 +13,7 @@ import StatsBanner from "./components/StatsBanner";
 import { UrgentAlert } from "./components/UrgentAlert";
 import { Preloader } from "./components/Preloader";
 import { Hero } from "./components/Hero";
+import { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } from "recharts";
 import fenrirLogo from "./assets/fenrir_logo.png";
 
 export default function App() {
@@ -39,23 +40,41 @@ export default function App() {
 
   // Handle scoring
   const handleScore = async (refIndex) => {
-    const idx = refIndex || parseInt(scoreInput, 10);
-    if (isNaN(idx) || idx <= 0) return;
+    // Determine which ref to score
+    // If refIndex provided (from proposal card), use it. Otherwise parse from input.
+    let idx = refIndex !== undefined ? refIndex : parseInt(scoreInput, 10);
+    
+    if (isNaN(idx) || idx < 0) {
+      setScoreError("Invalid referendum number");
+      setTimeout(() => setScoreError(""), 3000);
+      return;
+    }
+    
+    console.log(`[Fenrir] Starting score attempt for REF #${idx}`);
     setScoring(true);
     setScoredDone(false);
     setScoreError("");
+    
     try {
+      console.log(`[Fenrir] Calling scoreProposal(${idx})`);
       const result = await scoreProposal(idx);
+      console.log(`[Fenrir] scoreProposal result:`, result);
+      
       if (result?.alreadyScored) {
-        setScoreError("REF #" + idx + " is already scored.");
+        const msg = "REF #" + idx + " is already scored.";
+        console.log(`[Fenrir] ${msg}`);
+        setScoreError(msg);
         setTimeout(() => setScoreError(""), 3000);
       } else {
+        console.log(`[Fenrir] ✓ Successfully scored REF #${idx}`);
         setScoredDone(true);
         setScoreInput("");
         setTimeout(() => setScoredDone(false), 2000);
       }
     } catch (e) {
-      setScoreError(e.message || "Scoring failed");
+      const errMsg = e.message || "Scoring failed";
+      console.error(`[Fenrir] Scoring error:`, e);
+      setScoreError(errMsg);
       setTimeout(() => setScoreError(""), 4000);
     } finally {
       setScoring(false);
@@ -127,10 +146,11 @@ export default function App() {
 
             <button
               className={`score-btn ${scoreDone ? "done" : ""}`}
-              disabled={scoring || scoreDone || isScored(selected.refIndex)}
-              onClick={() => handleScore(selected.refIndex)}
+              disabled={scoring || scoreDone || (selected && isScored(selected.refIndex))}
+              onClick={() => selected && handleScore(selected.refIndex)}
+              title={!selected ? "Select a proposal first" : isScored(selected.refIndex) ? `REF #${selected.refIndex} already scored` : "Score this proposal on-chain"}
             >
-              {isScored(selected.refIndex)
+              {selected && isScored(selected.refIndex)
                 ? "Already scored"
                 : scoreDone ? "Scored ✓"
                 : scoring ? "Scoring..."
@@ -149,7 +169,16 @@ export default function App() {
     const totalDOT = scores.reduce((sum, p) => sum + Number(p.requestedDOT || 0), 0);
     const highRiskDOT = scores.filter(p => p.score >= 75).reduce((sum, p) => sum + Number(p.requestedDOT || 0), 0);
     const highRiskCount = stats.highRisk;
+    const moderateCount = stats.moderate || 0;
+    const lowCount = stats.low || 0;
+    const minimalCount = Math.max(0, (stats.total || 0) - highRiskCount - moderateCount - lowCount);
     const totalCount = stats.total;
+    const distribution = [
+      { name: "High", value: highRiskCount, color: "#e05252" },
+      { name: "Moderate", value: moderateCount, color: "#d97706" },
+      { name: "Low", value: lowCount, color: "#ca8a04" },
+      { name: "Minimal", value: minimalCount, color: "#16a34a" },
+    ];
 
     const fmtDOT = (n) => {
       if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
@@ -217,6 +246,80 @@ export default function App() {
                 <div className="stat-card-sub">{sub}</div>
               </div>
             ))}
+          </div>
+
+          <div style={{
+            background: "var(--bg-surface)",
+            border: "1px solid var(--bg-border)",
+            borderRadius: 10,
+            padding: "26px 28px",
+            marginTop: 14,
+          }}>
+            <div style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+              letterSpacing: "0.16em",
+              textTransform: "uppercase",
+              color: "var(--text-muted)",
+              marginBottom: 16,
+            }}>
+              Risk Distribution
+            </div>
+
+            <div style={{ width: "100%", height: 260 }}>
+              <ResponsiveContainer>
+                <PieChart>
+                  <Pie
+                    data={distribution}
+                    dataKey="value"
+                    nameKey="name"
+                    cx="50%"
+                    cy="50%"
+                    innerRadius={72}
+                    outerRadius={100}
+                    paddingAngle={2}
+                    stroke="none"
+                  >
+                    {distribution.map((entry) => (
+                      <Cell key={entry.name} fill={entry.color} />
+                    ))}
+                  </Pie>
+                  <Tooltip
+                    formatter={(value) => [value, "Proposals"]}
+                    contentStyle={{
+                      background: "#0f1218",
+                      border: "1px solid #1c2030",
+                      borderRadius: 8,
+                      color: "#e8eaf0",
+                      fontFamily: "var(--font-mono)",
+                      fontSize: 11,
+                    }}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginTop: 8 }}>
+              {distribution.map((item) => (
+                <div key={item.name} style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 8,
+                  fontFamily: "var(--font-mono)",
+                  fontSize: 11,
+                  color: "var(--text-secondary)",
+                }}>
+                  <span style={{
+                    width: 8,
+                    height: 8,
+                    borderRadius: 999,
+                    background: item.color,
+                    display: "inline-block",
+                  }} />
+                  {item.name}: {item.value}
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       </div>
@@ -415,7 +518,7 @@ function Nav({ view, setView, setSelected, isDemoMode }) {
       </div>
       <div className="nav-links">
         <button
-          className={`nav-btn ${view === "feed" && !false ? "active" : ""}`}
+          className={`nav-btn ${view === "feed" ? "active" : ""}`}
           onClick={() => { setSelected(null); setView("feed"); }}
         >
           Proposals
@@ -427,7 +530,10 @@ function Nav({ view, setView, setSelected, isDemoMode }) {
           Stats
         </button>
       </div>
-      {isDemoMode && <span className="nav-badge">DEMO MODE</span>}
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        {isDemoMode && <span className="nav-badge">DEMO MODE</span>}
+        <button className="connect-btn" type="button">Connect Wallet</button>
+      </div>
     </nav>
   );
 }

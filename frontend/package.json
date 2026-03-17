@@ -13,7 +13,8 @@
     "ethers": "^6.0.0",
     "gsap": "^3.14.2",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "recharts": "^2.15.4"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.0.0",
